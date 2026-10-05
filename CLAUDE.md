@@ -1,0 +1,753 @@
+# TamaDigi
+
+Digimon V-Pet firmware for the **Waveshare ESP32-S3-Touch-AMOLED-1.75**, built on
+the TamaPoke engine (socquique/TamaPoke -> DylanPDao -> eperdeme). Arduino/C++
+firmware + a Python asset pipeline + a browser-based flasher. Personal,
+non-commercial fan project: the code is MIT, the sprites are Bandai's.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `TamaDigi.ino` | Main sketch: UI, screens, touch, serial console, `FW_VERSION` |
+| `pet.cpp/.h` | Game state: care stats, tick, **digivolution** (`digiTarget()`), eggs, save/load |
+| `dex.h` | GENERATED: the 87 Digimon (Ver.1–5), stages, attributes, elements, `EVO_TBL` branches, versions |
+| `moves.h` / `move_names.h` | GENERATED: 151 attacks and the per-Digimon learnsets |
+| `trainers.h` / `badges.h` | GENERATED: the boss ladders and their (procedurally drawn) badges |
+| `avatars.h` / `music.h` / `backs.h` | GENERATED, all original art/music (see `tools/gen_avatars.py`, `gen_music.py`, `draw_backs.py`) |
+| `types.h` | Element chart + attribute triangle helpers (`battleEffPct`) |
+| `party.cpp/.h` | The 6-slot party and the 36-slot box |
+| `battle.cpp/.h`, `wild.cpp/.h`, `link*.cpp` | Turn-based battles, wild encounters + scanning, ESP-NOW LAN battles |
+| `i18n.cpp/.h` | 6-language string table (ES/EN/FR/DE/IT/PT), positional |
+| `sdmon.cpp/.h` | SD sprite streaming (TPK2) + USB `PUT` transfer |
+| `tools/digimon_data.py` | **THE single source of game data.** Edit here, then regenerate |
+| `tools/emu/` | Desktop emulator: runs the real firmware in an SDL window, plus the test suites |
+| `web/` | ESP Web Tools installer + `sprites-<version>.pak` |
+
+## The data pipeline
+
+```bash
+python3 tools/gen_dex.py        # dex.h        (roster, branches, chart, versions)
+python3 tools/gen_moves.py      # moves.h, move_names.h
+python3 tools/gen_ladders.py    # trainers.h, badges.h
+python3 tools/pack_sprites.py   # tools/sdcard/mons/p*.bin + noart.h (fetches the wayland-vpets Digimon Color sheets once)
+python3 tools/make_thumbs.py    # thumbs.bin
+python3 tools/pack_bundle.py    # web/sprites-*.pak + paks.json
+```
+
+Digivolution rules live in `EVOLUTIONS` in `digimon_data.py`: per source, an
+ordered list of (to, care-mistake range, training range, min wins). The first
+rule whose conditions hold AND whose target `speciesShowable()` wins. The stage
+clock (`STAGE_ENTRY`) decides WHEN; the rules decide INTO WHAT. Care mistakes and
+wins reset at every digivolution. `wins` lives in the pet checkpoint's former
+padding byte, so the record layout did not change.
+
+A Digimon with no sprite (`noart.h`) never hatches, is never a branch target and
+never appears in the wild. Ver.3 has no Baby I art, so `regionHatchable()` keeps
+its egg locked while its other Digimon still appear in the wild and the ladders.
+
+## Screenshots — and why they went a dozen releases stale
+
+`docs/screens/*.png` is what the README shows, and it is generated, not curated:
+
+```bash
+python3 tools/unpack_bundle.py     # ONCE per checkout -- see below
+bash tools/make_screens.sh         # regenerates every shot from the emulator
+```
+
+They come out of the emulator's headless `--shot` mode, so they are exactly what
+the firmware draws on the 466x466 panel — not mockups and not photographs.
+**Re-run after changing any screen.**
+
+They sat at 2026-08-19 until v3.22, which meant the README advertised the
+pre-v3.14 UI — flat horizontal stat bars, no tile axis — for a dozen releases.
+Nobody noticed for a reason worth understanding:
+
+- **`tools/sdcard/mons/*.bin` is gitignored**, because the loose sprites are build
+  intermediates and the `.pak` bundles are what ships. So a fresh checkout has no
+  sprite directory, and the emulator draws every creature as a bare dex number.
+  Running `make_screens.sh` in that state **overwrites the screenshots with
+  art-less ones** — strictly worse than leaving them stale, and invisible until
+  somebody opens the README. It refuses to run now, and says what to run instead.
+- **`tools/unpack_bundle.py` is the fast path**, and it exists so this is possible
+  at all: it restores 1951 sprite files from the committed `web/sprites-*.pak`
+  with no network, and the crc32s come back matching `paks.json`. `pack_sprites.py`
+  re-fetches ~40 MB per region and is only needed when adding a region.
+- **A failed shot used to be a skip.** `make_screens.sh` did `continue`, leaving
+  the previous PNG in place, so renaming a screen published a picture of
+  something that no longer existed while the script still reported success. It is
+  a hard failure now.
+
+The `SHOTS` list in `make_screens.sh`, the `--shot` names in
+`tools/emu/main_sdl.cpp` and the `<img>` tags in the README are three lists that
+must agree. Reconcile them all three ways after touching any of them — nothing
+referenced but ungenerated, nothing generated but unreferenced:
+
+```bash
+python3 - <<'EOF'
+import os, re
+readme = {os.path.basename(s) for s in
+          re.findall(r'<img\s+src="([^"]+)"', open('README.md').read())}
+disk = {f for f in os.listdir('docs/screens') if f.endswith('.png')}
+shots = {s + '.png' for s in
+         open('tools/make_screens.sh').read().split('SHOTS="')[1].split('"')[0].split()}
+print('missing on disk :', sorted(readme - disk) or 'none')
+print('unreferenced    :', sorted(disk - readme) or 'none')
+print('not generated   :', sorted(readme - shots) or 'none')
+EOF
+```
+
+**Check the prose against the code, not against memory.** Derive counts
+(`DEX_COUNT` 61, `REGION_COUNT` 5 including `REGION_ALL`, `GYM_REGIONS` 4) from
+the generated headers rather than trusting an old sentence.
+
+## The web installer's save vault
+
+`web/` is the only JavaScript in the project and it was entirely untested until
+v3.22, while the firmware half of the same feature had two suites. That asymmetry
+is why the backup path could accept a truncated capture and call it a backup.
+
+**The split is the important part.** `web/savefile.js` holds the format, the
+checksum and the verification, and **may not touch `window`, `document` or
+`navigator`** — that is the whole reason it is a separate file, because `node`
+has to import it for `tools/check_savefile.mjs`. Anything needing a DOM, a serial
+port or IndexedDB stays in `installer.js`. `web/packs.js` is the same arrangement
+for the pack upload (TPAK, CRC-32, `PUT`, `SUM`), which `tools/check_packs.mjs`
+drives against a fake board modelled on `sdmon.cpp`.
+
+```bash
+node tools/check_savefile.mjs      # both also run inside tools/emu/tests/run.sh,
+node tools/check_packs.mjs         # and check_release.py refuses a tag without them
+```
+
+Two rules that test earns its keep by:
+
+- The CRC is pinned to the **published check value** for CRC-16/CCITT-FALSE
+  (`"123456789"` gives `0x29B1`), not to a second copy of the algorithm.
+  Comparing an implementation against a re-implementation only proves they were
+  typed the same way. Breaking the polynomial fails that one assertion instantly.
+- `tools/fixtures/golden.tpsave` **was produced by the real firmware** and the
+  real firmware accepts it back, so the JS is tested against C++ output rather
+  than against the test's own idea of the format. Regenerate it by driving the
+  emulator, which reads stdin as its serial console:
+
+  ```bash
+  printf 'EGG 6\nLVL 30\nIV 31 20 25 28\nTR 40 30 20\nPARTY 25\nEXPORT\nWIPE\n' \
+    | SDL_VIDEODRIVER=dummy tools/emu/tamadigi-emu --save /tmp/f.nvs --wipe
+  ```
+  (`WIPE` is how it exits — `ESP.restart()` is `exit(0)` there.)
+
+Things that have already bitten, or nearly:
+
+- **`verifyBackup()` runs on BOTH directions on purpose.** The block handed to a
+  player is checked by the identical function that vets the block they hand back.
+  A backup is only worth anything if it was verified when it was taken; the
+  firmware validating on restore is too late to help.
+- **A capture that ends with the right line is not a complete capture.** The
+  board declares its byte count in the header; compare against it. Without that,
+  a short serial read looked exactly like a good backup.
+- **`releasePort()` exists because `setConnected(false)` is not a disconnect.**
+  It only forgets our references — the locks stay held and the port stays open,
+  so `esp-web-tools` cannot claim the device. Anything handing off to the flasher
+  must go through `releasePort()`.
+- **The page cannot back up during an install.** `esp-web-tools` is a third-party
+  custom element that calls `requestPort()` itself and owns the port throughout,
+  so the order has to be: our connection reads the save, release, then trigger
+  theirs. That also means the browser may prompt for the board twice, and the
+  page says so rather than surprising anyone.
+- **"Erase device" is inside their dialog, not ours.** We cannot see it or veto
+  it. Backup-then-install narrows the window; it cannot close it.
+- **esp-web-tools is VENDORED, and that is the save's safety, not tidiness.**
+  `new_install_prompt_erase: true` keeps the save only because of one line in
+  their install dialog (`? ASK_ERASE : _startInstall(true)`, box unchecked), and
+  the page used to load a floating `@10` from unpkg -- whatever 10.x was newest,
+  read by nothing here. It loads `web/vendor/esp-web-tools-<version>/` now and
+  `check_installer.py` reads THAT copy for both. Never point it back at a CDN;
+  updating it is a deliberate act, described in `web/README.md`.
+- **A restore keeps the save it replaces** in the browser history first. It is the
+  one action on the page that destroys a save, and it used to be the only one
+  with no copy taken before it.
+- **No remote storage, deliberately.** Pages is static so there is nowhere to
+  POST; any write token shipped in client JS is public; and a board ID is an
+  identifier, not a credential — it is not secret and it is enumerable, so it
+  authorises nothing. The `.tpsave` download is the off-machine backup, and it
+  costs nothing to host and creates no custody of anyone else's data. IndexedDB
+  is a convenience layer and the page labels it as one.
+
+## Releasing
+
+`git push origin vX.Y` is the whole release: `.github/workflows/publish-release.yml`
+runs `tools/check_release.py` and then publishes. Before tagging:
+
+1. `bash tools/build_web.sh` -- **after the last source edit.** `check_release.py`
+   verifies each binary's `?v=` hash against its own bytes, not against the
+   source, so a stale `app.bin` passes the check and ships anyway. The same run
+   computes every JS cache key (each module `installer.js` imports, then
+   `installer.js` into `index.html`) -- those were hand-maintained until
+   v3.22, which is a number and a promise that drift independently. The release
+   check refuses a tag where any has drifted, and runs the web tests itself:
+   `build_web.sh` skips them on a machine without node.
+2. `FW_VERSION`, the README badge and `web/manifest.json` must all match the tag.
+   `build_web.sh` does the manifest; the other two are by hand.
+3. **Write `docs/release-notes/vX.Y.md`.** `web/installer.js` reads the release
+   body through the GitHub API and puts it straight onto the installer page, so a
+   release with no notes greets visitors with "No changelog was provided for this
+   release." v3.20 shipped exactly that, because the workflow used
+   `--generate-notes` and all that generates is a bare compare link. It uses
+   `--notes-file` now and `check_release.py` refuses a tag without one.
+
+   The page renders the body in a `<pre>` with `textContent`, so `##` and `**`
+   appear literally. Keep it markdown anyway -- it renders properly on GitHub and
+   still reads as plain text there. **Write it for PLAYERS**: what changed, what
+   it looked like when it was broken, and whether they need to do anything. No
+   file or function names.
+
+4. **Merge to `main` and push it BEFORE tagging.** The tag must be on `main` —
+   see § "Git". `check_release.py` fails a tag that is not reachable from
+   `origin/main`, so tagging a branch tip now stops the release instead of
+   publishing from it.
+
+Note the Pages site serves `web/` from `main`, so the installer's "current build"
+only moves when `main` does. That is the other reason a release that never gets
+merged is only half a release: the tags exist, and everybody visiting the page
+still gets the old firmware.
+
+## Build & flash
+
+```bash
+FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
+arduino-cli compile --fqbn "$FQBN" .
+arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn "$FQBN" .
+
+bash tools/build_web.sh   # recompiles, writes the 4 parts, bumps the manifest, repacks every region
+```
+
+**PSRAM (OPI) is mandatory** — the 466×466×16-bit framebuffer is ~434 KB and lives there.
+Wrong partition scheme (no FAT) or PSRAM off = it builds and then fails on hardware.
+
+## Hard rules
+
+**No accents, ñ, or non-ASCII in any firmware string.** The bitmap font has no glyphs
+for them. This applies to *all six* languages — French, German, Portuguese and Spanish
+strings in `i18n.cpp` are deliberately written unaccented ("Esta", "bano", "Digidex").
+Adding a proper "é" silently renders as garbage on the panel.
+
+**Adding a UI string is a two-file, order-sensitive edit.** Append the `StrId` to the
+enum in `i18n.h`, then add the translation at the *same index* in all 6 rows of
+`STRINGS[LANG_COUNT][STR_COUNT]` in `i18n.cpp`. The table is positional — a missing
+entry in one language shifts every string after it in that language.
+
+**Balance changes must update the README.** `README.md` § "Game manual (the actual
+numbers)" documents exact drain rates, spawn odds and thresholds straight from the
+code. It is the project's spec, not decoration — changing a constant in `pet.h`/
+`pet.cpp` without updating that table makes the docs lie. Bump `FW_VERSION` in
+`TamaDigi.ino:27` and the firmware badge at the top of the README in the same commit.
+
+**Comments and commit messages are in English** — as of v1.5. Most of the existing
+source is commented in unaccented Spanish (the original author's convention) and is
+deliberately *not* being back-translated, so the codebase is mixed for now. Do not
+match the surrounding Spanish: any comment you write or edit goes in English, even
+in a file that is Spanish everywhere else. Never rewrite a Spanish comment purely to
+translate it — only when you are already changing that code for another reason.
+
+The default *UI* language is English (`LANG_DEFAULT LANG_EN`); UI strings live in
+`i18n.cpp` and are a separate matter from source comments.
+
+## Traps that have caught us more than once
+
+Every one of these shipped, was found by hand on a board, and had already been
+"fixed" somewhere else in the codebase at the time. Read this before touching a
+rule, a dex number or a paged screen.
+
+### 1. A rule enforced in one path but not in its twin
+
+This is the single most repeated mistake in the project. The rule is right; a
+second caller has its own copy of it, and nobody notices until a player does.
+
+| what | where it was enforced | where it was not | symptom |
+|---|---|---|---|
+| TM level gate | `relearnFromLevel()` | the STAB guarantee below it | a level 1 BETAMON beat the first boss with SURF |
+| TM level gate *again* | both of the above | `learnableFor()`, the picker | a level 22 AGUMON offered FIRE BLAST |
+| horizontal swipe = page | one screen at a time | the other three | the same paging bug shipped **four times** |
+| save survives an install | the four-part manifest | `new_install_prompt_erase` | fixing one still wiped a real player's pet |
+| digivolution threshold | `canEvolveNow()` | `renderCardProgress()` | the card would promise an digivolution that never came |
+| a region needs its pack | `sdBegin()`, at mount | files arriving later over `PUT` | the pack you just downloaded stayed greyed out until a reboot |
+| the 3 s hold is for the pet | a list of screens to EXCLUDE | every screen not on that list | holding a PARTY SLOT offered to release the LIVE pet |
+| sprites load up to `DEX_COUNT` | the emulator's `PmdMon::load()` | the firmware's, in `sdmon.cpp` (`> 999`) | dex 1000-61 never drew on a board while `sprite_test` passed |
+| thumbnails follow a new pack | `thumbs.load()` in `setup()` | a `thumbs.bin` arriving later over `PUT` | the region unlocked, and its Digidex thumbnails stayed old until a restart |
+| a control waits while the page is busy | `syncControls()` | Back up save, added after the list was written | `EXPORT` written into a pack transfer, then the port closed under it |
+
+**A guard written as a list of EXCLUSIONS is this trap pre-loaded.** The hold
+was gated by `!galleryOpen && !cardOpen && !kbOpen && !clockOpen`, so every
+screen added afterwards was live by default -- party, box, boss, battle, player,
+menu. On the party screen the grid overlaps `inPetZone` AND the dialog's YES box
+lands on party slot 4, so a hold plus a tap released the creature you were
+raising. It asks `uiCurrentScreen() == SCR_MAIN` now: state what is ALLOWED, not
+what is forbidden, or the list rots every time a screen is added.
+
+**The habit:** when you change a rule, `grep` for every caller and make them all
+ask ONE function. `moveUnlockLevel()` and `uiButtonDisabled()` exist for exactly
+this reason -- they are single answers that three and two callers respectively
+used to have their own opinions about.
+
+**And test the CALLER, not just the rule.** Reverting the picker to its own gate
+failed NOTHING until `swipe_test` was taught to drive `learnableFor()` itself:
+`moves_test` proved the rule was right while the screen ignored it.
+
+### 2. `uint8_t` with a dex of 386
+
+The expansion from 151 to 386 broke five separate things, all the same way, and
+they surfaced over months rather than at once:
+
+- `DexEntry::evolvesTo` -- every digivolution target above 255 overflowed
+- `TrainerMon::dex` -- Ver.3 rosters
+- `gen_moves.py`'s own `DEX_COUNT = 151` -- emitted a Ver.1-sized `LEARN_OFS`
+- the Digidex page cap `if (np > 9) np = 9` -- hid everything past dex 160
+- **`PmdMon::load(uint8_t)`** -- 131 Digimon drew Ver.1 sprites. A MARSHTOMP
+  (258) opened `p002.bin` and stood there as an KUWAGAMON. Shipped in v2.8.
+
+**The rule: anything holding a dex is `int16_t`, and any loop bound is
+`DEX_COUNT`.** Never the literal 151, never `uint8_t`.
+
+**And wearing an INDEX:** a move's index is its position in `MOVES`
+(`digimon_data.py`; `gen_moves.py` does `idx = i + 1`), and `Pet::moves[]` /
+`PartyMon::moves[]` store that index RAW in NVS. Inserting a move into its type
+section shifts every later move by one and silently rewrites the moveset of
+every creature already saved -- the live pet and every banked member, on every
+player's device. **New moves go at the END**, after STRUGGLE, under the
+`APPEND-ONLY BELOW HERE` marker. Same family as the box getting its own NVS key
+and badges being stored additively: never reinterpret bytes that already exist.
+
+**The same trap wearing a table instead of a width:** a helper that keeps its
+own copy of the REGION list. Four were found at once when Ver.4 landed --
+`pack_bundle.py` (whose comment literally read "Must match REGIONS in
+digimon_data.py" while it did not, so `sprites-sinnoh.pak` could never be built),
+`pack_sprites.py`'s `span` dict (so `pack_sprites.py sinnoh` was not a command),
+`index.html`'s button ids hardcoded in THREE separate JS loops, and
+`renderRegionPick()`/`regionPickTap()` looping `GYM_REGIONS` in all three modes
+so **Ver.4 had no row in the Digidex chooser at all** while the gallery cycled
+it happily. Derive the list; never restate it.
+
+**What hides it:** the neighbouring code is often already correct, so the screen
+looks half-right and nobody suspects a width. `SdThumbs::get()` takes an
+`int16_t`, so the gallery and the silhouettes were perfect while the creature on
+the main screen was somebody else entirely.
+
+### 3. A test that proves the transcription rather than the firmware
+
+- `sprite_test` first asserted `m.dex == d` -- which records what was ASKED for.
+  With the truncation put back it **still passed**; only comparing the loaded
+  PIXELS against the wrap-around Digimon caught it.
+- A Python `str.replace` whose anchor did not match silently no-opped, so
+  assertions were never inserted and the suite showed green.
+- `save_test` has to compare the field table against a store the FIRMWARE wrote,
+  not one a restore produced, or it validates itself. It did exactly that until
+  it was moved.
+
+**The specific shape, found four times in one session:** an assertion pinned to
+a VALUE that happens to hold rather than to the RULE.
+
+- `hit_test` checked the region was unchanged after 12 taps on the egg pill. The
+  taps were 8 px out -- INSIDE the 16 px hit area, so every one was a direct
+  hit -- and it passed only because `12 % REGION_COUNT(4) == 0` came full
+  circle. Ver.4 made it 5 and it broke. The dead guard band that section 4 says
+  this test protects had **never once been exercised**.
+- `roster_test` asserted `GYM_REGIONS == REGION_COUNT - 1`, true until a region
+  had data but no ladder -- which is the normal state mid expansion.
+- A new gating check asserted `nextAvailableRegion(0) == 0`, encoding a wrong
+  guess about `REGION_ALL` rather than the invariant.
+- Worst, a check phrased as a NEGATIVE ("never rests on a locked region") was
+  **vacuously true** when nothing was locked, and survived deleting the gate
+  entirely. Only the negative-check caught it.
+
+**A DIRECTORY IS NOT COVERAGE.** `check_sprites.py` counted `sprite/NNNN`
+existing as "has art" and reported Ver.4 100%, while `pack_sprites.py` failed on
+0668 PYROAR -- whose directory holds only the form subdirs `0000`/`0001` with no
+`AnimData.xml` of its own. The table said complete and the packer disagreed;
+the packer was right. It now HEADs the actual sprite per Digimon (curl, in
+parallel -- the git tree API comes back truncated at 19 MB and urllib has no
+cert store here), which also found four more over-reported Digimon in Ver.4,
+Ver.4 and Ver.5. Coverage has to mean "can be drawn", because it decides what
+can hatch.
+
+**A tool that reports a partial fetch as fact is the same disease.**
+`check_sprites.py` paged the GitHub API and `break`'d on any failure, returning
+whatever it had -- so a rate-limited run said an entire generation had no art.
+Harmless while it only printed a table; not once that list decides which Digimon
+can hatch. It fails loudly now, and sanity-checks the total.
+
+**A test at the END of a long suite is running in whatever state the suite left
+behind.** The long-press guard was first checked at the bottom of `touch_test`,
+which by then had opened a dozen screens: `cardOpen` was still set, so the hold
+was refused for the wrong reason, and the check passed *with the bug put back*.
+Twice -- the second time because the panel had DIMMED, and `swallowGesture` eats
+a gesture before the gate is consulted at all. It lives in `release_test` now,
+from a known state, and asserts the screen it thinks it is on before testing
+anything. Prefer a fresh harness to appending onto a long one.
+
+**The habit that catches all of them: break it on purpose and watch the test
+fail.** Every guard added since has been negative-checked that way, and it has
+caught a bad test roughly as often as it has confirmed a good one. If an
+assertion cannot fail, it is not a test. A guard phrased as "X never happens"
+needs a companion proving the mechanism actually engaged.
+
+**A test that keeps its own copy of a LAYOUT is the same disease.** `touch_test`
+aimed at the menu's STATS row with the literal `104 + 16 + 22`, beside a comment
+claiming it was `MENU_ROW_Y(0) + 22`. It never was: it landed ONE PIXEL inside
+row 0 and passed for that reason alone. Adding a sixth row moved the boundary
+and the same tap started opening the BAG. It asks `uiMenuRowCenterY(i)` now --
+the same reason `rpickPageCount()`, `uiButtonHeights()` and `btlCellHit()` are
+functions rather than numbers a test may re-type.
+
+**And a state a test leaves behind is the next test's input.** The bag check
+added next to it closed the stats card, and the move-picker check three lines
+below had always continued from that card being open -- so the suite failed
+somewhere other than where it broke. Restore what you borrow, or start fresh.
+
+### 5. sizeof(PartyMon) is load-bearing in four places
+
+Growing the stored record is supported, but only THREE of the four paths that
+depend on its size knew that. Appending the care block to `PartyMon` (so a
+creature can be swapped in and out without being reset) broke the other one:
+
+| what | how it depends on the size | state before |
+|---|---|---|
+| `Party::begin()`, the party | migrates a shorter blob by length | correct |
+| `Party::begin()`, the box | **no length migration at all** | would have silently emptied every box |
+| `save.cpp` `MAX_VAL` | **hardcoded 768**, "the box is the largest, at 18 records" | box dropped from every EXPORT while every other field still restored |
+| `SAVE_FIELDS` | must list every NVS key | fine, but the new `bag` key had to be added |
+
+The box one is the dangerous shape: `getBytes` refuses an oversized blob and
+leaves the destination alone, so the box reads back EMPTY and the next
+`boxSave()` writes that emptiness over the real one. It has the party's
+migration now.
+
+`MAX_VAL` is the more instructive one. It was a literal with a comment
+explaining the arithmetic, which is a number and a promise that drift
+independently -- a backup that is quietly PARTIAL is worse than no backup, and
+nothing about the failure was visible except `save_test`. It is
+`sizeof(PartyMon) * BOX_SLOTS` now. **Derive it; never restate it** -- the same
+rule as § "The same trap wearing a table instead of a width".
+
+`stateVersion` on the record defaults to **0, not 1**, and that is deliberate.
+The migration `memcpy`s `oldStride` bytes over a default-constructed record and
+leaves the tail alone, so any field defaulting to "I have real data" is a lie
+the moment the struct grows again. 0 means "this predates care state", and
+`switchTo()` reads the banked level instead.
+
+### 4. What the emulator structurally cannot see
+
+Timing, DMA tearing, PSRAM pressure, audio, battery, the radio -- and two more
+that have each cost a real bug:
+
+- **Touch accuracy.** Synthetic taps are exact coordinates, so a target that is
+  hard to hit with a finger tests perfectly. The battle grid's bottom row, the
+  party BOX button and the egg's region pill were all reported from a board.
+
+  **A small target next to an irreversible action is the dangerous shape.**
+  Missing the region pill fell through to `pet.eggTap()`, and three taps hatch
+  an egg -- so fumbling at the selector hatched the egg you were re-aiming.
+  Where a miss would do something you cannot undo, swallow it: the pill has a
+  hit area larger than its graphic AND a dead guard band beyond that, and
+  `hit_test` fails if either goes away.
+- **Whether the FIRMWARE compiles at all.** `tools/emu/build.sh` generates a
+  `proto.h` with every prototype at the top, so the emulator happily builds a
+  sketch that `arduino-cli` rejects for using a function before it is declared.
+  A green emulator build is not proof the firmware builds. `tests/run.sh` now
+  runs the real `arduino-cli compile` first and stops if it fails.
+- **A missing `gfx->flush()`.** `--shot` reads `gfx->buffer()` directly and
+  never consults `frameReady`, so a frozen panel photographs perfectly. That is
+  what `flush_test` is for.
+
+## Testing
+
+**The game logic and the UI can both be tested without a board.** `pet.cpp`,
+`party.cpp` and `i18n.cpp` are plain C++ with no hardware dependency beyond
+`Arduino.h`/`Preferences.h`, so `tools/emu/` stubs those and compiles the *real*
+sources — including `TamaDigi.ino` — into a clickable SDL app:
+
+```bash
+brew install sdl2 && bash tools/emu/build.sh
+tools/emu/tamadigi-emu --scale 2 --fast 60      # clickable, serial on stdin
+tools/emu/tamadigi-emu --shot battle --out s.ppm  # headless screenshot
+```
+
+Prefer this for anything about balance, save/load, migrations or layout: it runs
+in seconds and can simulate a full 3-day life. Write assertions against the real
+classes rather than re-implementing their formulas in the test — a harness that
+restates the rules only proves the transcription, not the firmware.
+
+What the emulator can NOT tell you: timing, touch behaviour, DMA tearing, PSRAM
+pressure, audio, battery. Those still need the board.
+
+On hardware, verify over the serial console (115200):
+
+- `STATS` full state · `HEALTH` uptime, heap, **PSRAM**, the current screen and
+  whether the two battle sprites are resident · `WIPE` factory reset
+- The emulator can **fake a crash**: type `PANIC` or `WDT` at it and it parks
+  the breadcrumb in a file beside the save, re-execs itself, and comes up
+  reporting the crash exactly as the board would. Both are intercepted in
+  `main_sdl.cpp` and never reach the firmware -- a serial command that fakes a
+  crash has no business existing on hardware.
+- **Every boot prints why the last run ended** (`boot: reset=...`). After a
+  panic, a watchdog or a brownout it also prints `CRASH: it died on the '<screen>'
+  screen with heap=N` -- a breadcrumb kept in RTC memory, which survives a reset
+  but not a power cycle. This exists because "it has a mini crash" is not
+  actionable: the board never used to say what it was doing. `flush_test`
+  asserts the crumb names the screen actually on the panel, since a report that
+  points at the wrong screen is worse than none.
+- `SPEC <dex>` `LVL <n>` `IV <a> <d> <s> <h>` `HATCH` `VARIANT` `EGGS` (20 eggs) `GAL`
+- `MISS <n>` set the care mistakes (`desc=` on STATS); each one delays every
+  digivolution by a level, so `MISS 0` forgives a neglected start
+- `TR <atk> <def> <spe>` set the training (this game's EVs); clamped to
+  `trMaxFor(iv)`, so it cannot build a creature the player could not raise
+- `PARTY` / `PARTY <dex>` / `PARTY CLEAR` inspect, fill and empty the party
+- `BATTLE <dex> [lvl]` start a fight (debug entry until boss ladders exist)
+- `EGG <dex> [variant]` hatch a chosen Digimon: the legendary (3 perfect IVs) and
+  variant (IV floor 20) guarantees fire only inside `hatch()`, so this is the only
+  way to reach them — `VARIANT` just flips the flag on an already-hatched pet
+- `BYE` / `RUN` / `ABANDON` — the three endings · `BEEP` audio · `LS` / `PUT` SD files
+- `TIME <epoch>` / `RTCSET <epoch>` — offline-progression and clock paths
+
+To exercise long-horizon logic in minutes, temporarily lower `PET_TICK_MS`,
+`MINUTES_PER_LEVEL` and `FAREWELL_AGE_MIN` in `pet.h`.
+
+## Constraints worth remembering
+
+- Sprites are ~40 MB and stream from microSD at runtime; they are never linked into
+  the binary. Missing SD = the `S_NO_SPRITES` path, which must stay graceful.
+- **A card that will not mount is formatted only when asked** (`SD MOUNT FORMAT`,
+  which the installer sends after a confirmation). It used to be formatted at
+  boot, unasked, whatever was on it. The core's FatFs has no exFAT
+  (`FF_FS_EXFAT 0`), so most new cards over 32 GB need that one click.
+- The pet keeps ageing while powered off via the RTC, catching up to 2 weeks max.
+  Any change to tick/aging must survive a large `deltaMinutes` jump without overflow.
+- `TamaDigi.ino` is one large sketch by design. Prefer small, surgical diffs over
+  refactoring it into modules unless that's the explicit task.
+
+## Git
+
+**Develop on a feature branch. Merge to `main`. Tag off `main`.** In that order,
+every time.
+
+- **Never commit straight to `main`.** Work happens on a branch and arrives by
+  merge. (This has been broken once, by an agent that merged a branch, stayed on
+  `main` and committed the next change there. Check what branch you are on before
+  committing, not after.)
+- **A release is cut from `main`, never from a branch tip.** Push the branch,
+  merge to `main`, push `main`, *then* tag the merged commit. `v3.18` and `v3.22`
+  were tagged on branch tips before this was written down, and an earlier version
+  of this file cited that as precedent — it was not. Do not copy it.
+- `tools/check_release.py` **enforces this**: a tag whose commit is not reachable
+  from `origin/main` fails the release workflow, so the rule cannot quietly rot
+  the way a documented-only convention does.
+- Prefer a fast-forward merge. `main`'s recent history is linear from v3.14
+  onward, and keeping release tags on the first-parent line is what makes
+  `git describe` and the release compare links behave sensibly.
+
+### Player-wide vs per-creature state
+
+Badges (easy and hard), the avatar, the daily streak, the Digidex bitmaps and
+`totalMedals` belong to the PLAYER and outlive every pet. `newEgg()` must never
+clear them -- `persist_test` proves they survive all three endings plus a
+reload, so adding a reset there will now fail the suite rather than quietly
+erase a run.
+
+The one thing that does take them is `WIPE` (`factoryReset()` -> `prefs.clear()`),
+which is a factory reset and is meant to.
+
+They also have their own checkpoint pair, `plyA`/`plyB` -- see below.
+
+### The save is CHECKPOINTED, and the legacy keys are no longer the truth
+
+Read the header comment in `pet.cpp` before touching any of this. The short
+version, because it is the most expensive bug this project has shipped:
+
+**NVS writes one key at a time and `Preferences` commits on every `put()`.** A
+save spread over ~50 keys is therefore not atomic. A power cut in the middle
+leaves the early fields new and the later ones old, and what loads is a creature
+assembled from two lives -- current Attack training beside older Defence, Speed
+and Digimon. That was reported as issue #3 and it was never a logic bug.
+
+So each logical record is now ONE blob, CRC-guarded, written into TWO keys
+alternately. The newest complete blob wins; if the write in flight never landed,
+the previous one is whole.
+
+| Record | Keys | Holds |
+|---|---|---|
+| the creature | `petA` / `petB` | Digimon, age, IVs, training, moves, care, nickname, **and the pending party handover** |
+| the player | `plyA` / `plyB` | trainer name, avatar, region, both badge ladders, the Digidex bitmaps, streak, medals, records |
+
+Four things about it that are easy to get wrong:
+
+- **THE BODY IS APPEND-ONLY.** The CRC sits at the END, located by the record's
+  own `size`, so a reader takes the prefix it understands and leaves its newer
+  fields at their initialisers. Insert a field instead of appending one and you
+  silently reinterpret every save on every device -- the same rule as move
+  indices and the badge arrays (§ "wearing an INDEX"). If a change genuinely
+  cannot be expressed that way, **bump the MAGIC, not the version**: that
+  invalidates the record loudly instead of misreading it quietly. `version` is
+  carried for diagnostics only.
+- **Rejecting a checkpoint falls back to the legacy keys, which IS the torn-write
+  path.** The first version of this demanded an exact size and version match, so
+  the next field anybody added would have quietly reintroduced issue #3 on every
+  device in the field. That is why the reader is tolerant and why
+  `static_assert(offsetof(PetCoreSnapshot, pad0) == PET_FIXED - 1)` exists --
+  failing it is the reminder to read the append-only rule, not to edit the
+  number and move on.
+- **The player record cannot be a struct.** `dexReg` is sized by `DEX_COUNT`,
+  `eggByRegion` by `REGION_COUNT`, the badge arrays by `GYM_REGIONS`, and this
+  project grows all three. A struct would move every field after whichever array
+  grew. So the DIMENSIONS TRAVEL IN THE HEADER and each array is copied by its
+  own prefix rule -- `loadBlob()`'s reasoning, applied inside one atomic blob.
+- **One generation counter PER RECORD, never shared.** Slots alternate by the
+  parity of the next generation, which is always `loaded + 1`, so the slot being
+  written is always the opposite of the one loaded from -- the fallback copy can
+  never be the one overwritten. Share a counter between the two records and that
+  breaks the moment one write succeeds and the other does not.
+  `powerloss_test` pins the invariant directly.
+
+The ~50 legacy keys stopped being written in v4.0 to reduce duplicate writes.
+That was **not a verified fix for issue #5**: `buildSquad()` copied the live
+`Pet`, including its owning `Preferences` handle. Destroying the temporary
+closed the real pet's NVS handle, so badge saves failed. The emulator missed
+it because `Preferences::end()` was a no-op. `Pet` is now non-copyable, and
+combatant level caps do not require a copy. The stub models shared-handle
+closure and `touch_test` checks the badge and training after reload.
+
+`load()`/`Party::begin()` retain the legacy upgrade path and persist its
+checkpoint immediately so `EXPORT` does not omit a freshly migrated save.
+Downgrades are unsupported; in particular, pre-checkpoint firmware cannot read
+a checkpoint-only backup. Forward migration must continue preserving saves.
+
+`powerloss_test` covers all of it, and every guard in it was negative-checked by
+breaking the firmware on purpose. Note `poisonLegacy()` in that file: almost
+every pet field is mirrored to a legacy key, so without it the fixture tests all
+passed with the checkpoint reader disabled entirely -- § "A test that proves the
+transcription rather than the firmware", caught again.
+
+### NVS can run out, and the core's answer is to erase the whole partition
+
+`nvs_flash_init()` returns `ESP_ERR_NVS_NO_FREE_PAGES` when the partition is
+full, and `initArduino()` (`esp32-hal-misc.c`) responds by calling
+`esp_partition_erase_range()` over the entire thing **before `setup()` runs**.
+Every save on the device, gone, with nothing a player could see. Nothing in the
+firmware could see it coming either: `putX()` returning short was discarded at
+every call site except the checkpoints.
+
+The stock `app3M_fat9M_16MB` table gives `nvs` 20 KB -- five 4 KB pages, ~630
+entries of 32 bytes -- and NVS needs a free page to compact into. `nvsinfo.cpp`
+reports headroom at boot and in the `HEALTH` heartbeat so the trend is visible
+during a soak test. It cannot prevent the wipe.
+
+**Do not "fix" this by growing `nvs` in the partition table.** `nvs` ends exactly
+where `otadata` starts, so growing it moves `otadata`, `app0` and `app1`, and the
+newly-added tail then contains leftover app bytes rather than erased flash --
+which is the case that triggers the erase above. If more room is ever genuinely
+needed, `ffat` (9.875 MB at `0x610000`) is **unused** -- the sprite packs are on
+a real SD card via `SD_MMC`, not on that partition -- and it sits after both app
+slots, so it can be shrunk and a new partition added in the freed tail without
+moving a single existing offset. Measure with `nvs_get_stats` first; fewer writes
+per save is the real fix.
+
+### Losing power is not the only way to lose a save
+
+- **A 4-second hold on PWR is a HARDWARE power-off inside the AXP2101.** The
+  rails drop and the firmware is never told, so it cannot save on shutdown. What
+  it can do is take the PMU's long-press interrupt, which fires at the
+  long-press threshold and therefore BEFORE the off threshold. `pwrLongPressed()`
+  and `batLowWarning()` both route into `flushBeforePowerLoss()`. **The lead time
+  is the PMU's, not ours -- measure it on hardware.** `XPOWERS_POWEROFF_6S`
+  widens it if 4 s turns out too tight.
+- The PMU **latches** its interrupts and one register read reports all of them,
+  so there can be only ONE poller: `pwrPoll()`, once per loop, which clears
+  unconditionally. The old code cleared only when it had seen a short press,
+  which was harmless while that was the only enabled interrupt and would have
+  left every new bit latched forever.
+- `flushBeforePowerLoss()` is deliberately the single entry point for all three
+  callers, because the one case where flushing must NOT happen -- a `WIPE`
+  waiting to restart, where the shutdown handler would write the deleted
+  creature straight back -- has to be impossible for the next caller to forget.
+  An earlier attempt put that guard on `Pet` instead and broke `console_test`,
+  which wipes the shared global pet and keeps using it.
+- **The party handover used to live only in RAM.** `update()` hands the creature
+  over and `newEgg()` saves the egg immediately, but the party write waits for
+  the player to accept a slot -- a banner or a whole chooser screen later. A
+  power cut in that window lost the creature with the save that erased it already
+  committed. It is in the pet checkpoint now, so the egg and the creature it
+  replaced commit together. Go through `clearEnded()` / `setEnded()`, never
+  `pet.endedKind = ...`.
+- **`Pet::saveHealthy()` is false when NVS would not open or has refused three
+  writes in a row**, and `drawSaveWarning()` puts a red triangle beside the
+  battery. A player who knows saving is broken can `EXPORT`; one who does not
+  loses the week. It is not a dialog on purpose: the condition persists, so a
+  modal would be dismissed once and forgotten.
+
+### Gesture map -- DONE, do not re-plan it
+
+Three axes, one meaning each. This replaced a per-screen grab-bag in v3.13 and
+is recorded here as fact so nobody redesigns it from the old notes.
+
+| Gesture | Means | Where |
+|---|---|---|
+| Horizontal | move along the TILE AXIS | `PLAYER . PARTY . [PET] . EXPLORE . GYM . DEX` |
+| Up | deeper (the pet's card, a sheet) | everywhere |
+| Down | BACK, one level | everywhere |
+| Rim drag | PAGE the current screen | every paged screen |
+
+**The horizontal axis BUMPS at both ends and can no longer close anything.**
+That is the entire point. Paging and exiting used to be the SAME gesture -- a
+screen paged until you ran off the end, at which point it closed -- which is
+case 1 of § "Traps" and shipped four times. Paging moved to the rim
+(`onRim`, `uiRimTarget`) precisely so the two can never be confused again.
+
+**`uiRimTarget()` is the single table of paged screens**: which variable holds
+the page and how many there are. The arc scrollbar, the rim drag and
+`swipe_test` all read it, so a new paged screen gets its scrollbar, its gesture
+and its coverage from one edit. Adding a screen to `onSwipe` instead is the old
+mistake wearing new clothes.
+
+**The tile order is not arbitrary.** `PLAYER . PARTY . [PET] . EXPLORE . GYM .
+DEX` keeps yours on the left and the world on the right. Explore is beside the
+pet because it is a primary loop, not an action owned by the boss ladder. The pet
+screen names both neighboring destinations so the horizontal axis is visible
+before somebody already knows to swipe.
+
+**Both multi-region tiles still open on their CHOOSER**, and `swipe_test` still
+asserts it. Down backs out of a ladder to the chooser and out of the chooser to
+the pet; up keeps the region shortcut it always had.
+
+`uiChrome()` draws the axis dots and the arc scrollbar, and every renderer that
+is on the axis or pages calls it immediately before `gfx->flush()`. A screen
+either has the chrome or visibly does not.
+
+### Round-panel geometry: ask, never guess
+
+`uiSafeHalfWidth(y)` is the half-chord at row y, and `uiSafeHalfWidthFor(y0,y1)`
+the narrower of two -- a rounded box is widest at its middle but its CORNERS are
+what leave the circle. Every full-width layout asks these. The boss ladder used
+to draw five identical 326 px rows over y 110..374 where the real chord runs
+448 down to 372: wasting 66 px in the middle AND hanging the end rows' corners
+off the glass, both at once.
+
+**`UI_TAP_MIN` is 44 and is a HARD FLOOR, not a target.** It is 44 *points*
+borrowed as pixels: this panel is 466 px over 1.75 in = 266 ppi, so a pixel is
+0.095 mm and 44 px is 4.2 mm -- under half a fingertip. It survives only because
+several laid-out screens cannot grow without being redesigned. **New work uses
+`UI_TAP_FINGER` (94 px = 9 mm)**, and `hit_test` holds `uiButtonHeights()` to it.
+
+That single mis-scaled constant is behind all three "hard to hit" reports. The
+home icons were 60 px (5.7 mm) with a 6 px gap; they are 80 px now, which is
+only possible because the four care bars moved to the rim as arcs and gave the
+bottom of the panel back. Four `UI_TAP_FINGER` targets in one row would reach
+radius 222 of 233 -- so a finger-safe home row on this panel is three icons, not
+four, and 80 px is the honest compromise that keeps all four.
+
+**The party and box are a RING of six, not a 2x3 grid** (`partySlotPos`,
+`partySlotAt`, `partyHubAt`). A grid on a circle spends its corners on glass
+that is not there; the old 150x70 cells were 70 px tall, under the floor, with
+their outer corners at the bezel. The BOX button is the hub in the middle,
+because the centre of a round panel is the easiest place on it to hit.
+`hit_test` MEASURES the slot radius off `partySlotAt()` rather than reading
+`PSLOT_R`, so it checks the hit areas the firmware actually answers with.
+

@@ -1,0 +1,615 @@
+// Headless proof that a click reaches onTap(). Replaces main_sdl.cpp's main()
+// and runtime globals, then drives the REAL setup()/loop()/handleTouch() by
+// poking the same touch globals the SDL event loop pokes.
+//
+// Build twice: with and without -DNO_IRQ, to A/B the emuFireInterrupt() fix.
+#include "Arduino.h"
+#include "Arduino_GFX_Library.h"
+#include "Preferences.h"
+#include "pet.h"
+#include "party.h"
+#include "moves.h"
+#include "battle.h"
+#include "trainers.h"
+#include "inventory.h"
+#include <chrono>
+#include <thread>
+#include <string>
+#include <deque>
+
+uint32_t g_seed = 0xC0FFEE;
+FakeSerial Serial;
+FakeESP ESP;
+FakeWire Wire;
+volatile int g_touchX = 0, g_touchY = 0;
+volatile bool g_touchDown = false;
+
+// millis() deliberately NOT defined here: clock.cpp is linked in so this
+// exercises the real emulator clock, --fast handling included.
+void FakeESP::restart() { exit(0); }
+
+// No stdin console in this harness: the serial path is not what is under test.
+int FakeSerial::available() { return 0; }
+String FakeSerial::readStringUntil(char) { return String(""); }
+
+void setup();
+void loop();
+extern Pet pet;   // defined in the sketch
+extern bool trainOpen, sackOpen, gameOpen, menuOpen, cardOpen, movePickOpen, spdOpen;
+extern bool memoOpen;
+extern bool bagOpen, playerOpen;
+int uiMenuRowCenterY(int i);
+// The training menu's geometry, read from the firmware rather than restated here.
+int uiTrainRowTop(int i);
+int uiTrainRowH();
+int uiBagRowCenterY(int i);
+extern uint8_t movePickSlot, movePickPage;
+extern bool battleOpen, btlOver, btlWon;
+extern Combatant btlYou, btlFoe;
+extern uint8_t btlMsgCount;
+void startBattle(int16_t dex, uint8_t lvl);
+void startTrainerBattle(uint8_t idx, bool hard);
+extern uint8_t btlFoeAt, btlSquadN, btlSquadAt, btlMenu;
+extern Combatant btlSquad[7];
+extern int8_t btlSwapWho;
+extern bool btlHard;
+extern bool gymOpen, gymHard; extern uint8_t gymPage, gymRegion, btlRegion;
+extern bool gymPick;
+extern uint8_t pickRegion;
+void gymRowRect(int i, int *x, int *y, int *w, int *h);
+extern bool pickOpen, pickHard; extern uint8_t pickTrainer; extern uint16_t squadMask;
+uint8_t squadCap(uint8_t idx, bool hard);
+uint8_t pickChosen(); uint8_t pickCandidates(); void pickDefault(uint8_t);
+extern uint8_t pickPage;
+#define PICK_X(i) (78 + ((i) % 2) * 160)
+#define PICK_Y(i) (86 + ((i) / 2) * 80)
+#define BTL_CELL_X(i) (69 + ((i) % 2) * 168)
+#define BTL_CELL_Y(i) (286 + ((i) / 2) * 52)
+uint8_t learnableList(uint8_t *out, uint8_t max);
+#define MOVE_PICK_PER_PAGE 5
+#define MOVE_PICK_Y(i) (76 + (i) * 58)
+extern uint8_t cardPage;
+
+// handleTouch() self-gates to 50 Hz off millis(), so real time must pass
+// between polls; a tight loop() spin would be swallowed by that gate.
+static void pump(int times) {
+  for (int i = 0; i < times; i++) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    loop();
+  }
+}
+
+static void fire() {
+#ifndef NO_IRQ
+  emuFireInterrupt();
+#endif
+}
+
+// One press/release at (x,y), driven exactly as the SDL event loop drives it.
+static void click(int x, int y) {
+  g_touchX = x; g_touchY = y; g_touchDown = true;
+  fire();
+  pump(5);                       // finger held: gesture starts
+  g_touchDown = false;
+  fire();
+  pump(3);                       // finger up: gesture resolves as a tap
+}
+
+void uiButtonAt(int i, int *cx, int *cy, int *half);
+
+int main(int argc, char **argv) {
+  if (argc > 1) emuSetTimeScale((uint32_t)atoi(argv[1]));
+  printf("--- time scale x%u ---\n", emuTimeScale());
+  setup();
+  pump(4);
+
+  if (!pet.awaitingStarter()) { printf("FAIL: not on the starter screen\n"); return 1; }
+  printf("on starter screen, awaitingStarter=1\n");
+
+  // First boot: tap a V-Pet version and its Digi-Egg appears. Negative
+  // control first: a click below every row must choose nothing, or this test
+  // proves nothing about coordinate routing.
+  click(233, 420);
+  pump(2);
+  if (!pet.awaitingStarter()) { printf("FAIL: off-row click chose a version\n"); return 1; }
+  printf("click at (233,420) off the rows: correctly ignored\n");
+
+  click(233, 108 + 30);          // row 0: VER.1
+  pump(2);
+  if (pet.region != 0) { printf("FAIL: region tap did not land\n"); return 1; }
+  if (pet.awaitingStarter()) { printf("FAIL: click did not register\n"); return 1; }
+  if (pet.eggPeek() != 1) { printf("FAIL: VER.1's egg is not BOTAMON\n"); return 1; }
+  printf("PASS: tap reached onTap and picked a starter\n");
+
+  // --fast must still do its job: with no finger down, game time has to run at
+  // the scale. Otherwise the touch fix would have quietly neutered the flag.
+  uint32_t t0 = millis();
+  auto w0 = std::chrono::steady_clock::now();
+  pump(20);                      // ~600 ms of real time, idle
+  uint32_t gameMs = millis() - t0;
+  uint64_t realMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - w0).count();
+  double ratio = realMs ? (double)gameMs / (double)realMs : 0.0;
+  printf("idle: %llu ms real -> %u ms game (x%.1f, want x%u)\n",
+         (unsigned long long)realMs, gameMs, ratio, emuTimeScale());
+  if (ratio < emuTimeScale() * 0.8 || ratio > emuTimeScale() * 1.2) {
+    printf("FAIL: --fast no longer accelerates idle game time\n");
+    return 1;
+  }
+  printf("PASS: --fast still accelerates idle game time\n");
+
+  // ---- new UI routing: 5th icon -> training submenu -> the two live tamers,
+  // and the menu's STATS row -> the stats card page. Both changed index
+  // mappings inside existing handlers, which is where an off-by-one would hide.
+  if (pet.isEgg()) pet.dbgHatchAs(6, false);
+  pump(4);
+
+  // The learn prompt is MODAL -- it swallows every tap until answered -- so a
+  // creature with moves waiting will ignore the icons. That is correct
+  // behaviour, and it started firing here as soon as digimon_data.py gained the
+  // cheap early attacks: a level 1 creature now actually has things to learn.
+  while (pet.hasLearnOffer()) pet.declineLearn();
+  pump(2);
+  int tbx, tby; uiButtonAt(3, &tbx, &tby, nullptr);   // ask, do not hardcode:
+  click(tbx, tby);                       // the dumbbell, the 4th of 4
+  if (!trainOpen) { printf("FAIL: train icon did not open the submenu\n"); return 1; }
+  printf("PASS: 5th icon opens the training submenu\n");
+
+  // ASKED, NOT HARDCODED. These were literal y coordinates -- 178, 242, 306 --
+  // and the training menu grew a fourth row, which retuned the pitch and moved
+  // every one of them onto the row below. The test then failed for the right
+  // reason while pointing at the wrong thing: it was restating a layout instead
+  // of reading it, which is the shape CLAUDE.md warns about and exactly why
+  // uiMenuRowCenterY() a few lines down exists at all.
+  {
+    const int mid = uiTrainRowH() / 2;
+    struct Route { int row; bool *flag; const char *what; };
+    const Route route[] = {
+      { 0, &sackOpen, "STRENGTH routes to the punching bag" },
+      { 1, &spdOpen,  "SPEED routes to the reaction test" },
+      { 2, &gameOpen, "DEFENCE routes to the ball game" },
+      { 3, &memoOpen, "MEMORY routes to the memory game" },
+    };
+    for (const Route &r : route) {
+      if (!trainOpen) click(tbx, tby);
+      click(233, uiTrainRowTop(r.row) + mid);
+      if (!*r.flag) {
+        printf("FAIL: training row %d did not start its game\n", r.row);
+        return 1;
+      }
+      printf("PASS: %s\n", r.what);
+      *r.flag = false;
+    }
+  }
+  trainOpen = false;
+
+  click(233, 60);                        // name/status band opens the menu
+  if (!menuOpen) { printf("FAIL: name band did not open the menu\n"); return 1; }
+  click(233, uiMenuRowCenterY(0));       // asked, not hardcoded: see the note there
+  if (!cardOpen || cardPage != 1) {
+    printf("FAIL: STATS row -> cardOpen=%d cardPage=%d (want 1,1)\n",
+           (int)cardOpen, (int)cardPage);
+    return 1;
+  }
+  printf("PASS: menu STATS row opens the stats card page\n");
+
+  // The row BELOW it is the bag, and it must be its own row rather than more of
+  // row 0's hit area -- which is how the tap above used to land.
+  cardOpen = false;
+  click(233, 60);
+  click(233, uiMenuRowCenterY(1));
+  if (!bagOpen || cardOpen) {
+    printf("FAIL: BAG row -> bagOpen=%d cardOpen=%d (want 1,0)\n",
+           (int)bagOpen, (int)cardOpen);
+    return 1;
+  }
+  printf("PASS: menu BAG row opens the bag\n");
+
+  pet.trAtk = 0;
+  pet.saveNow();
+  bag.add(IT_ATKCHIP);
+  uint8_t proteinRow = 0;
+  while (proteinRow < bag.distinctCount() && bag.keyAt(proteinRow) != IT_ATKCHIP)
+    proteinRow++;
+  if (proteinRow >= bag.distinctCount()) {
+    printf("FAIL: Protein did not appear in the field bag\n");
+    return 1;
+  }
+  click(233, uiBagRowCenterY(proteinRow));
+  uint8_t trainedAtk = pet.trAtk;
+  Pet afterVitamin;
+  afterVitamin.begin();
+  if (!trainedAtk || afterVitamin.trAtk != trainedAtk) {
+    printf("FAIL: Protein training did not survive reload (%u -> %u)\n",
+           trainedAtk, afterVitamin.trAtk);
+    return 1;
+  }
+  printf("PASS: training gained from a field item persists immediately\n");
+  bagOpen = false;
+
+  uint8_t oldAvatar = pet.avatar;
+  playerOpen = true;
+  click(233, 100);
+  Pet afterAvatar;
+  afterAvatar.begin();
+  if (pet.avatar == oldAvatar || afterAvatar.avatar != pet.avatar) {
+    printf("FAIL: avatar change did not survive reload (%u -> %u -> %u)\n",
+           oldAvatar, pet.avatar, afterAvatar.avatar);
+    return 1;
+  }
+  printf("PASS: an avatar change persists immediately\n");
+  playerOpen = false;
+
+  // Put the card back: everything below this line continues from it, and a
+  // check that quietly changes the state its neighbours depend on is how a
+  // suite starts failing somewhere other than where it broke.
+  cardOpen = true;
+
+  // ---- moves card page -> picker -> slot actually changes, with no duplicates
+  cardPage = 2;
+  uint8_t before = pet.moves[1];
+  click(233, 154);                       // slot 1 == MOVE_ROW_Y(1)
+  if (!movePickOpen) { printf("FAIL: tapping a move slot did not open the picker\n"); return 1; }
+  printf("PASS: tapping a move slot opens the picker\n");
+
+  click(233, 100);                       // first row of the picker
+  if (movePickOpen) { printf("FAIL: picking a move left the picker open\n"); return 1; }
+  if (pet.moves[1] == before) { printf("FAIL: slot 1 did not change\n"); return 1; }
+  printf("PASS: picking a move replaces the slot (%s -> %s)\n",
+         before ? MOVE_TBL[before].name : "-",
+         pet.moves[1] ? MOVE_TBL[pet.moves[1]].name : "-");
+  Pet afterMove;
+  afterMove.begin();
+  if (afterMove.moves[1] != pet.moves[1]) {
+    printf("FAIL: the replacement move did not survive reload\n");
+    return 1;
+  }
+  printf("PASS: a replacement move persists immediately\n");
+
+  // the swap must never leave the same move in two slots
+  bool dupe = false;
+  for (int i = 0; i < MOVE_SLOTS; i++)
+    for (int j = i + 1; j < MOVE_SLOTS; j++)
+      if (pet.moves[i] && pet.moves[i] == pet.moves[j]) dupe = true;
+  if (dupe) {
+    printf("FAIL: a move ended up in two slots\n");
+    for (int i = 0; i < MOVE_SLOTS; i++)
+      printf("      slot %d: %s\n", i, pet.moves[i] ? MOVE_TBL[pet.moves[i]].name : "-");
+    return 1;
+  }
+  printf("PASS: no duplicate move after the swap\n");
+
+  // picking a move the pet already knows should TRADE slots, not clone it
+  uint8_t s0 = pet.moves[0], s2 = pet.moves[2];
+  cardPage = 2;
+  click(233, 212);                       // slot 2
+  uint8_t all[64];
+  uint8_t n = learnableList(all, sizeof(all));
+  int page = -1, row = -1;
+  for (uint8_t i = 0; i < n; i++)
+    if (all[i] == s0) { page = i / MOVE_PICK_PER_PAGE; row = i % MOVE_PICK_PER_PAGE; }
+  if (page >= 0) {
+    movePickPage = page;
+    click(233, MOVE_PICK_Y(row) + 10);
+    bool ok = (pet.moves[2] == s0 && pet.moves[0] == s2);
+    printf("%s: picking a known move trades the two slots (0=%s 2=%s)\n",
+           ok ? "PASS" : "FAIL",
+           pet.moves[0] ? MOVE_TBL[pet.moves[0]].name : "-",
+           pet.moves[2] ? MOVE_TBL[pet.moves[2]].name : "-");
+    if (!ok) return 1;
+  }
+  // ---- level-up learn prompt: accept into a slot, and decline.
+  // Past level 36, so LEER@15 / FLAMETHROWER@34 / WING ATTACK@36 are all in
+  // range and more of them exist than there are slots.
+  pet.ageMinutes = 40 * MINUTES_PER_LEVEL;
+  pet.relearnFromLevel();
+  pet.lastLearnLevel = 0;
+  pet.learnQCount = 0;
+  pet.checkLearnGates();
+  if (!pet.hasLearnOffer()) { printf("FAIL: no learn offer was queued\n"); return 1; }
+  printf("PASS: crossing gates with a full moveset queues an offer\n");
+
+  uint8_t offered = pet.learnOffer(), was2 = pet.moves[2];
+  click(233, 104 + 2 * 56 + 10);          // LEARN_ROW_Y(2)
+  if (pet.moves[2] != offered) {
+    printf("FAIL: accepting did not put %s in slot 2 (got %s)\n",
+           MOVE_TBL[offered].name, pet.moves[2] ? MOVE_TBL[pet.moves[2]].name : "-");
+    return 1;
+  }
+  printf("PASS: accepting replaces the chosen slot (%s -> %s)\n",
+         was2 ? MOVE_TBL[was2].name : "-", MOVE_TBL[offered].name);
+
+  if (pet.hasLearnOffer()) {
+    uint8_t before[MOVE_SLOTS];
+    for (int i = 0; i < MOVE_SLOTS; i++) before[i] = pet.moves[i];
+    uint8_t skipped = pet.learnOffer();
+    click(233, 334 + 20);                 // LEARN_SKIP_Y
+    bool same = true;
+    for (int i = 0; i < MOVE_SLOTS; i++) if (pet.moves[i] != before[i]) same = false;
+    if (!same || pet.knowsMove(skipped)) {
+      printf("FAIL: declining changed the moveset\n"); return 1;
+    }
+    printf("PASS: declining %s leaves the moveset untouched\n", MOVE_TBL[skipped].name);
+  }
+  // ---- battle: drive a whole fight through the real tap handler
+  while (pet.hasLearnOffer()) pet.declineLearn();
+  pet.ageMinutes = 50 * MINUTES_PER_LEVEL;
+  pet.relearnFromLevel();
+  startBattle(9, 50);
+  if (!battleOpen) { printf("FAIL: battle did not start\n"); return 1; }
+  printf("PASS: BATTLE opens (%s L%u vs %s L%u)\n",
+         btlYou.name, btlYou.level, btlFoe.name, btlFoe.level);
+
+  uint16_t foeHp0 = btlFoe.hp;
+  int turns = 0;
+  while (battleOpen && turns < 60) {
+    turns++;
+    if (btlMsgCount) { click(233, 320); continue; }   // clear narration
+    int slot = -1;
+    for (int i = 0; i < MOVE_SLOTS; i++) if (btlYou.moves[i]) { slot = i; break; }
+    if (slot < 0) break;
+    click(BTL_CELL_X(slot) + 40, BTL_CELL_Y(slot) + 20);
+  }
+  printf("     after %d taps: you %u/%u, foe %u/%u, over=%d won=%d\n",
+         turns, btlYou.hp, btlYou.maxHp, btlFoe.hp, btlFoe.maxHp,
+         (int)btlOver, (int)btlWon);
+  if (btlFoe.hp >= foeHp0) { printf("FAIL: tapping a move did no damage\n"); return 1; }
+  printf("PASS: tapping a move resolves a turn and deals damage\n");
+  if (!btlOver) { printf("FAIL: fight never concluded\n"); return 1; }
+  printf("PASS: the fight concludes and closes\n");
+
+  // ---- a tamer fight: the foe's squad must chain, and winning awards a badge
+  pet.ageMinutes = 100 * MINUTES_PER_LEVEL;   // strong enough to sweep the first boss
+  pet.relearnFromLevel();
+  while (pet.hasLearnOffer()) pet.declineLearn();
+  bool hadBadge = pet.hasBadge(0, 0, false);
+  startTrainerBattle(0, false);
+  if (!battleOpen) { printf("FAIL: trainer battle did not start\n"); return 1; }
+  printf("PASS: gym battle starts (squad of %u vs the first boss)\n", btlSquadN);
+
+  int taps = 0;
+  uint8_t sawFoeAt = 0;
+  while (battleOpen && taps < 200) {
+    taps++;
+    if (btlMsgCount) { click(233, 320); continue; }
+    int slot = -1;
+    for (int i = 0; i < MOVE_SLOTS; i++) if (btlYou.moves[i]) { slot = i; break; }
+    if (slot < 0) break;
+    click(BTL_CELL_X(slot) + 40, BTL_CELL_Y(slot) + 20);
+    if (btlFoeAt > sawFoeAt) sawFoeAt = btlFoeAt;
+  }
+  printf("     %d taps, foe reached team index %u, won=%d\n", taps, sawFoeAt, (int)btlWon);
+  if (sawFoeAt == 0) { printf("FAIL: the second gym creature never came out\n"); return 1; }
+  printf("PASS: the trainer sends out its next creature on a faint\n");
+  if (!btlWon) { printf("FAIL: a L100 creature lost to the first boss\n"); return 1; }
+  if (!pet.hasBadge(0, 0, false) || hadBadge) { printf("FAIL: no badge awarded\n"); return 1; }
+  printf("PASS: beating a leader awards its badge (%u/8)\n", pet.badgeCount(false));
+  if (!pet.saveHealthy() || pet.savePending()) {
+    printf("FAIL: the gym win left saving broken or pending\n");
+    return 1;
+  }
+  Pet afterGym;
+  afterGym.begin();
+  if (!afterGym.hasBadge(0, 0, false) || afterGym.trAtk != pet.trAtk ||
+      afterGym.trDef != pet.trDef || afterGym.trSpe != pet.trSpe) {
+    printf("FAIL: the gym badge or its training reward did not survive reload\n");
+    return 1;
+  }
+  printf("PASS: a gym win keeps saving healthy and its badge and training survive reload\n");
+
+  // The selected version becomes battle-owned state. Replacements and badge
+  // awards use btlRegion, not the boss chooser's mutable version.
+  for (uint8_t region = 1; region < GYM_REGIONS; region++) {
+    battleOpen = false;
+    gymRegion = region;
+    startTrainerBattle(0, false);
+    if (btlRegion != gymRegion) {
+      printf("FAIL: region %u battle kept region %u\n", gymRegion, btlRegion);
+      return 1;
+    }
+    const Trainer &leader = TRAINER_SETS[gymRegion].list[0];
+    if (btlFoe.dex != leader.team[0].dex) {
+      printf("FAIL: region %u battle did not start with its own leader\n", gymRegion);
+      return 1;
+    }
+    btlFoe.hp = 0;
+    btlSwapWho = 1;
+    btlMsgCount = 1;
+    click(233, 320);  // dismiss the faint message; the real replacement arrives
+    if (btlFoeAt != 1 || btlFoe.dex != leader.team[1].dex) {
+      printf("FAIL: region %u leader replaced its lead with dex %u\n",
+             gymRegion, btlFoe.dex);
+      return 1;
+    }
+  }
+  printf("PASS: every non-Ver.1 leader sends its own second creature\n");
+  battleOpen = false;
+  gymRegion = 0;
+
+  // The TEAM PICKER owns its version too. squadCap() and the picker header used to
+  // read the chooser's mutable gymRegion, so the hard-mode team cap and the boss
+  // named on the screen came from wherever the chooser happened to be pointing --
+  // the same missing snapshot as btlRegion, one screen earlier. Not reachable
+  // through the gesture map today (onTap/onSwipe/onSwipeV all check pickOpen and
+  // return before the gymRegion writes), which is exactly why it needs pinning:
+  // it is one dispatch-order change away from being reachable, and this project
+  // has shipped the same paging bug four times for that reason.
+  {
+    const uint8_t saveRegion = gymRegion, savePick = pickRegion;
+    const bool savePickOpen = pickOpen, saveHard = gymHard, saveGymOpen = gymOpen;
+    const uint8_t openOn = 1;                            // VER.2
+    const uint8_t want = TRAINER_SETS[openOn].list[0].count;
+    // The version to move the chooser to is FOUND, not guessed. Ver.2 and Pendulum
+    // both field two creatures in their first boss, so the obvious hardcoded pair
+    // made this assertion true whether the fix was there or not -- it passed with
+    // the bug deliberately put back. If no version differs, the test cannot detect
+    // anything and says so rather than reporting a pass.
+    int other = -1;
+    for (uint8_t r = 0; r < GYM_REGIONS && other < 0; r++)
+      if (TRAINER_SETS[r].list[0].count != want) other = (int)r;
+    if (other < 0) {
+      printf("FAIL: every first gym fields %u, so this test cannot see the bug\n", want);
+      return 1;
+    }
+    gymRegion = openOn;
+    gymHard = true;
+    gymOpen = true;
+    gymPick = false;                                     // past the chooser, on the ladder
+    gymPage = 0;
+    int rx, ry, rw, rh;
+    gymRowRect(0, &rx, &ry, &rw, &rh);
+    click(rx + rw / 2, ry + rh / 2);                     // open the picker on boss 1
+    if (!pickOpen || pickRegion != openOn) {
+      printf("FAIL: the picker did not capture its region (open=%d region=%u)\n",
+             pickOpen ? 1 : 0, pickRegion);
+      return 1;
+    }
+    if (squadCap(0, true) != want) {
+      printf("FAIL: cap %u on opening, want %u\n", squadCap(0, true), want);
+      return 1;
+    }
+    gymRegion = (uint8_t)other;     // move the chooser under the open picker
+    if (squadCap(0, true) != want) {
+      printf("FAIL: the cap followed the chooser to %s (%u, want %u)\n",
+             TRAINER_SETS[other].region, squadCap(0, true), want);
+      return 1;
+    }
+    printf("PASS: the team picker keeps the region it was opened for "
+           "(%s x%u, chooser moved to %s x%u)\n",
+           TRAINER_SETS[openOn].region, want, TRAINER_SETS[other].region,
+           TRAINER_SETS[other].list[0].count);
+    pickOpen = savePickOpen;
+    pickRegion = savePick;
+    gymRegion = saveRegion;
+    gymHard = saveHard;
+    gymOpen = saveGymOpen;
+  }
+
+  // ---- hard mode caps the team to the opponent's size AND level
+  battleOpen = false;
+  pet.ageMinutes = 100 * MINUTES_PER_LEVEL;   // a level 100 creature
+  startTrainerBattle(0, true);                // the first Ver.1 boss
+  uint8_t top = 0;
+  const Trainer &first = TRAINER_SETS[0].list[0];
+  for (uint8_t i = 0; i < first.count; i++) if (first.team[i].level > top) top = first.team[i].level;
+  printf("     hard vs %s: squad %u, your lead is L%u (pet is L%u)\n",
+         first.name, btlSquadN, btlYou.level, pet.level());
+  if (btlYou.level != top) {
+    printf("FAIL: level not capped to the boss's top (got %u, want %u)\n", btlYou.level, top);
+    return 1;
+  }
+  printf("PASS: hard mode caps your level to the leader's best\n");
+  if (btlSquadN > first.count) { printf("FAIL: squad not capped to the boss's\n"); return 1; }
+  printf("PASS: hard mode caps your team size to the leader's\n");
+  if (pet.level() != 100) { printf("FAIL: the stored pet was modified\n"); return 1; }
+  printf("PASS: the stored creature is untouched (still L%u)\n", pet.level());
+  battleOpen = false;
+
+  // ---- switching mid-fight
+  battleOpen = false; pickOpen = false; pet.badges = 0;
+  for (int i = 0; i < 3; i++) { PartyMon m; m.dex = 9 + i * 10; m.level = 40;
+    m.ivAtk = m.ivDef = m.ivSpe = m.ivHp = 25; party.replaceAt(i, m); }
+  squadMask = 0xFFFF;
+  startTrainerBattle(0, false);
+  if (btlSquadN < 2) { printf("FAIL: squad too small to test switching\n"); return 1; }
+  printf("PASS: battle starts with a squad of %u\n", btlSquadN);
+
+  btlMenu = 0;
+  click(150, 274 + 52 + 22);            // DIGIMON: lower-LEFT cell now (RUN is right)
+  if (btlMenu != 2) { printf("FAIL: DIGIMON did not open the switch list\n"); return 1; }
+  printf("PASS: DIGIMON opens the switch list\n");
+
+  uint8_t was = btlSquadAt;
+  uint16_t swFoeHp0 = btlFoe.hp;
+  click(69 + 40, 286 + 22);             // slot 0 = the one already out: inert
+  if (btlSquadAt != was) { printf("FAIL: switching to the active creature was allowed\n"); return 1; }
+  printf("PASS: you cannot switch to the one already out\n");
+
+  btlMenu = 2;
+  click(69 + 168 + 40, 286 + 22);       // slot 1
+  if (btlSquadAt == was) { printf("FAIL: the switch did not happen\n"); return 1; }
+  printf("PASS: switching brings on another creature (slot %u -> %u)\n", was, btlSquadAt);
+  bool costTurn = (btlYou.hp < btlYou.maxHp) || (btlFoe.hp == swFoeHp0);
+  printf("     foe hp %u -> %u, your new one %u/%u\n", swFoeHp0, btlFoe.hp, btlYou.hp, btlYou.maxHp);
+  if (!costTurn) { printf("FAIL: switching was free -- the foe never acted\n"); return 1; }
+  printf("PASS: switching spends the turn\n");
+  battleOpen = false; btlMenu = 0;
+  for (int i = 0; i < 3; i++) party.releaseAt(i);
+
+  // ---- the boss ladder is sequential: only the next one may be entered
+  battleOpen = false; pickOpen = false;
+  pet.badges = 0;                       // nothing beaten yet
+  gymOpen = true; gymHard = false; gymPage = 0;
+  click(233, 110 + 1 * 50 + 20);        // RIVAL, the second row
+  if (pickOpen || battleOpen) { printf("FAIL: a locked leader was enterable\n"); return 1; }
+  printf("PASS: a locked leader cannot be entered\n");
+  click(233, 110 + 0 * 50 + 20);        // the first boss, the first
+  if (!pickOpen) { printf("FAIL: the first leader was not enterable\n"); return 1; }
+  printf("PASS: the first leader is always open\n");
+  pickOpen = false;
+  pet.badges = 1;                       // the first boss beaten
+  gymOpen = true; gymPage = 0;
+  click(233, 110 + 1 * 50 + 20);        // RIVAL again
+  if (!pickOpen) { printf("FAIL: beating one did not unlock the next\n"); return 1; }
+  printf("PASS: beating a leader unlocks the next\n");
+  pickOpen = false;
+  // and the hard ladder is its own run
+  gymOpen = true; gymHard = true; gymPage = 0;
+  click(233, 110 + 1 * 50 + 20);
+  if (pickOpen) { printf("FAIL: easy progress unlocked the hard ladder\n"); return 1; }
+  printf("PASS: hard mode keeps its own unlock order\n");
+  gymHard = false; gymOpen = false; pet.badges = 0;
+
+  // ---- a live pet plus a FULL party is 7 candidates against a cap of 6. The
+  // 7th used to be counted but never drawn and never tappable, so FIGHT sat
+  // inert with no way to fix it.
+  battleOpen = false; pickOpen = false;
+  for (int i = 0; i < PARTY_SLOTS; i++) { PartyMon m; m.dex = 9 + i * 10; m.level = 40;
+    m.ivAtk = m.ivDef = m.ivSpe = m.ivHp = 25; party.replaceAt(i, m); }
+  pickTrainer = 0; pickHard = false; pickPage = 0;
+  pickDefault(squadCap(0, false));
+  printf("     candidates=%u chosen=%u cap=%u\n",
+         pickCandidates(), pickChosen(), squadCap(0, false));
+  if (pickCandidates() != PARTY_SLOTS + 1) { printf("FAIL: expected 7 candidates\n"); return 1; }
+  printf("PASS: a live pet plus a full party is 7 candidates\n");
+  if (pickChosen() > squadCap(0, false)) {
+    printf("FAIL: the picker opens over its own cap\n"); return 1; }
+  printf("PASS: it opens with a valid selection, not everything\n");
+  { uint8_t pages = (pickCandidates() + 6 - 1) / 6;
+    if (pages < 2) { printf("FAIL: 7 candidates must span 2 pages\n"); return 1; }
+    printf("PASS: the 7th is reachable on page %u of %u\n", pages, pages); }
+  for (int i = 0; i < PARTY_SLOTS; i++) party.releaseAt(i);
+  squadMask = 0xFFFF;
+
+  // ---- team select: cap enforcement and toggling
+  battleOpen = false;
+  for (int i = 0; i < 5; i++) { PartyMon m; m.dex = 9 + i; m.level = 40;
+    m.ivAtk = m.ivDef = m.ivSpe = m.ivHp = 25; party.replaceAt(i, m); }
+  squadMask = 0xFFFF;
+  pickTrainer = 0; pickHard = true; pickOpen = true;   // the first boss: cap of 2
+  uint8_t cap = squadCap(0, true);
+  // x=300: FIGHT sits right of centre now, with BACK to its left. Tapping 233
+  // lands in the gap between them and hits nothing, which made the next check
+  // pass for the wrong reason.
+  click(300, 366);                                     // FIGHT with 6 chosen
+  if (battleOpen || !pickOpen) { printf("FAIL: FIGHT fired while over the cap\n"); return 1; }
+  printf("PASS: FIGHT is inert while over the cap (%u chosen, cap %u)\n", 6, cap);
+
+  // deselect down to the cap, then it should start
+  for (int slot = 5; slot >= (int)cap; slot--)
+    click(PICK_X(slot) + 40, PICK_Y(slot) + 30);
+  click(300, 366);
+  if (!battleOpen) { printf("FAIL: FIGHT did not start at the cap\n"); return 1; }
+  printf("PASS: trimming to the cap lets the fight start (squad %u)\n", btlSquadN);
+  if (btlSquadN > cap) { printf("FAIL: squad exceeded the cap\n"); return 1; }
+  printf("PASS: the squad respects the chosen team\n");
+  battleOpen = false;
+  squadMask = 0xFFFF;
+  for (int i = 0; i < 5; i++) party.releaseAt(i);
+
+  // easy caps the level too -- it just does not cap the team size
+  startTrainerBattle(0, false);
+  if (btlYou.level != top) { printf("FAIL: easy mode did not cap the level\n"); return 1; }
+  printf("PASS: easy mode caps the level as well\n");
+  return 0;
+}

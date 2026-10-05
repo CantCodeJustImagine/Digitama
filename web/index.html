@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f1e8">
+  <title>TamaDigi - Installer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="https://github.com/joop0810/TamaDigi" target="_blank" rel="noreferrer">
+      <span class="brand-mark" aria-hidden="true"><span></span></span>
+      <span>TamaDigi</span>
+    </a>
+    <span class="device-label">ESP32-S3 / 466 AMOLED</span>
+  </header>
+
+  <main class="shell">
+    <section class="intro" aria-labelledby="page-title">
+      <div class="intro-copy">
+        <p class="eyebrow">Firmware and SD manager</p>
+        <h1 id="page-title">Build your TamaDigi.</h1>
+        <p>Flash the board, install only the V-Pet versions you want, and keep a restorable copy of your tamer, Digimon, party, box, badges, and settings.</p>
+        <div class="compatibility">
+          <span class="signal signal-ready" aria-hidden="true"></span>
+          Chrome or Edge on macOS, Windows, or Linux
+        </div>
+      </div>
+      <div class="device-preview" aria-label="TamaDigi running on its round display">
+        <img src="../docs/screens/main.png" alt="TamaDigi main pet screen">
+        <img src="../docs/screens/player.png" alt="TamaDigi tamer screen">
+      </div>
+    </section>
+
+    <div class="notice notice-error" id="unsupported" hidden>
+      <i data-lucide="circle-alert" aria-hidden="true"></i>
+      <div><strong>Web Serial is not available.</strong> Open this page in desktop Chrome or Edge.</div>
+    </div>
+
+    <section class="work-section" aria-labelledby="firmware-title">
+      <header class="section-heading">
+        <span class="step-number">01</span>
+        <div>
+          <p class="eyebrow">Board firmware</p>
+          <h2 id="firmware-title">Choose a version and flash</h2>
+        </div>
+      </header>
+
+      <div class="edition-grid" id="editions" aria-live="polite">
+        <p class="muted">Loading firmware catalogue...</p>
+      </div>
+
+      <div class="action-row flash-row">
+        <button class="button button-primary" id="backup-save">
+          <i data-lucide="shield-check" aria-hidden="true"></i>
+          Back up save
+        </button>
+        <!-- The button MUST stay slot="activate". esp-web-tools binds its click
+             handler to a <slot name="activate"> inside its own shadow root, so this
+             slotted button is the only element whose click can reach it -- clicking
+             the host does nothing at all. check_installer.py refuses a build that
+             loses it, and installer.js says why at length. -->
+        <esp-web-install-button id="flash-button" manifest="manifest.json">
+          <button class="button button-secondary" id="flash-activate" slot="activate">
+            <i data-lucide="cpu" aria-hidden="true"></i>
+            <span>Install firmware</span>
+          </button>
+          <span slot="unsupported">Use Chrome or Edge to flash this board.</span>
+          <span slot="not-allowed">This installer requires HTTPS or localhost.</span>
+        </esp-web-install-button>
+        <p class="action-copy" id="edition-summary">Every build includes the whole game and loads the Digimon sprites from microSD.</p>
+      </div>
+      <div class="status" id="flash-status" role="status" hidden></div>
+      <div class="status" id="advice-status" role="status" hidden></div>
+      <p class="action-copy"><strong>Back up save</strong> reads, verifies and downloads the current save. <strong>Install firmware</strong> opens the flasher. Use both when updating a board; each needs its own click and board selection because the browser grants serial access one action at a time. A brand-new board can go straight to Install firmware.</p>
+
+      <section class="release-notes" aria-labelledby="release-notes-title">
+        <header>
+          <div>
+            <p class="eyebrow">Changelog</p>
+            <h3 id="release-notes-title">Current Pages build</h3>
+          </div>
+          <a id="release-link" href="https://github.com/joop0810/TamaDigi/releases" target="_blank" rel="noreferrer">All releases</a>
+        </header>
+        <pre id="release-notes-body">Loading version notes...</pre>
+      </section>
+
+      <details class="install-note">
+        <summary><i data-lucide="shield-check" aria-hidden="true"></i> Updating an existing board</summary>
+        <p>Leave <strong>Erase device</strong> unchecked. A normal update preserves the save in flash and every sprite on the microSD. Erasing has no undo, so make a backup below first.</p>
+        <p>A brand-new board may only appear in download mode: hold <strong>BOOT</strong>, tap <strong>RESET</strong>, then release <strong>BOOT</strong>.</p>
+      </details>
+    </section>
+
+    <section class="work-section" aria-labelledby="packs-title">
+      <header class="section-heading section-heading-split">
+        <div class="heading-group">
+          <span class="step-number">02</span>
+          <div>
+            <p class="eyebrow">microSD library</p>
+            <h2 id="packs-title">Sync version packs</h2>
+          </div>
+        </div>
+        <div class="connection" id="connection-state">
+          <span class="signal" aria-hidden="true"></span>
+          <span>Board not connected</span>
+        </div>
+      </header>
+
+      <div class="connect-strip">
+        <button class="button button-primary" id="connect">
+          <i data-lucide="usb" aria-hidden="true"></i>
+          Connect board
+        </button>
+        <p>One connection manages packs and saves. After a firmware install, the page finds the board again by itself once the install dialog is closed.</p>
+      </div>
+
+      <div class="pack-toolbar">
+        <div>
+          <h3>Available versions</h3>
+          <p id="catalogue-summary">Loading pack catalogue...</p>
+        </div>
+        <div class="toolbar-actions">
+          <button class="button button-quiet button-small" id="refresh-packs" disabled title="Read installed packs again">
+            <i data-lucide="refresh-cw" aria-hidden="true"></i>
+            Refresh
+          </button>
+          <button class="button button-quiet button-small" id="select-needed" disabled>Select needed</button>
+        </div>
+      </div>
+
+      <div class="region-grid" id="regions" aria-live="polite"></div>
+
+      <div class="deploy-bar">
+        <div>
+          <strong id="selection-title">No packs selected</strong>
+          <span id="selection-detail">Connect a board to compare its SD card.</span>
+        </div>
+        <button class="button button-accent" id="install" disabled>
+          <i data-lucide="download" aria-hidden="true"></i>
+          Install selected
+        </button>
+      </div>
+
+      <div class="progress" id="progress" hidden>
+        <div class="progress-copy">
+          <span id="progress-label">Preparing transfer...</span>
+          <span id="progress-value">0%</span>
+        </div>
+        <div class="progress-track" id="progress-track" role="progressbar" aria-labelledby="progress-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="progress-fill"></div></div>
+      </div>
+
+      <div class="status" id="pack-status" role="status" hidden></div>
+
+      <div class="custom-pack">
+        <i data-lucide="file-up" aria-hidden="true"></i>
+        <span>Generated your own sprite files?</span>
+        <button type="button" class="text-action" id="files-button" disabled>Choose .bin files</button>
+        <input id="files" type="file" accept=".bin" multiple hidden>
+      </div>
+    </section>
+
+    <section class="work-section" aria-labelledby="save-title">
+      <header class="section-heading">
+        <span class="step-number">03</span>
+        <div>
+          <p class="eyebrow">Save vault</p>
+          <h2 id="save-title">Back up or restore your game</h2>
+        </div>
+      </header>
+      <div class="save-layout">
+        <div>
+          <h3>Download backup</h3>
+          <p>Exports the complete save from internal flash: the live Digimon, party, box, Digidex, badges, inventory, and settings.</p>
+          <button class="button button-secondary" id="backup" disabled>
+            <i data-lucide="hard-drive-download" aria-hidden="true"></i>
+            Download save
+          </button>
+        </div>
+        <div>
+          <h3>Restore backup</h3>
+          <p>This page checks the length, format and checksum before sending anything and keeps a copy of the save it replaces. The firmware validates the backup again before replacing your save, then restarts.</p>
+          <button class="button button-secondary" id="restore-button" disabled>
+            <i data-lucide="hard-drive-upload" aria-hidden="true"></i>
+            Restore save
+          </button>
+          <input id="restore" type="file" accept=".tpsave,.txt" hidden>
+        </div>
+      </div>
+      <div class="status" id="save-status" role="status" hidden></div>
+
+      <section class="release-notes" aria-labelledby="history-title">
+        <header>
+          <div>
+            <p class="eyebrow">Recent backups</p>
+            <h3 id="history-title">Kept in this browser</h3>
+          </div>
+          <button class="button button-secondary" id="history-clear" disabled>Clear</button>
+        </header>
+        <p class="action-copy">A convenience, not a backup. These live only in this browser on this computer, and are lost if you clear site data, use private browsing, or move to another machine. <strong>The downloaded <code>.tpsave</code> file is the real backup</strong> &mdash; keep it somewhere you trust.</p>
+        <div id="history" aria-live="polite"></div>
+      </section>
+    </section>
+
+    <section class="activity" aria-labelledby="activity-title">
+      <header>
+        <div>
+          <p class="eyebrow">Live output</p>
+          <h2 id="activity-title">Activity</h2>
+        </div>
+        <div class="activity-actions">
+          <button class="icon-button" id="copy-log" title="Copy diagnostics for a bug report" aria-label="Copy diagnostics for a bug report">
+            <i data-lucide="clipboard-copy" aria-hidden="true"></i>
+          </button>
+          <button class="icon-button" id="clear-log" title="Clear activity log" aria-label="Clear activity log">
+            <i data-lucide="trash-2" aria-hidden="true"></i>
+          </button>
+        </div>
+      </header>
+      <pre id="log" aria-live="polite">Ready. Flash the firmware or connect a running board.</pre>
+    </section>
+  </main>
+
+  <footer>
+    <span>Personal, non-commercial fan project.</span>
+    <span>Sprites: Digimon Color &copy; Bandai, via <a href="https://github.com/furudbat/wayland-vpets" target="_blank" rel="noreferrer">wayland-vpets</a>. Fan project, non-commercial.</span>
+    <a href="https://github.com/joop0810/TamaDigi" target="_blank" rel="noreferrer">Source and game manual</a>
+  </footer>
+
+  <!-- Vendored and pinned: whether an update keeps the save depends on code inside
+       this package, and check_installer.py reads the copy that ships. -->
+  <script type="module" src="vendor/esp-web-tools-10.4.0/install-button.js"></script>
+  <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
+  <script type="module" src="installer.js?v=aacc3e7465f0e8b0"></script>
+</body>
+</html>

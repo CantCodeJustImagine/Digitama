@@ -1,0 +1,215 @@
+// Host versions of the three hardware modules. The sprite loader is the real
+// TPK2/TPTH parser, just reading from a directory instead of the SD card.
+#include "Arduino.h"
+#include "sdmon.h"
+#include "rtcbat.h"
+#include "audio.h"
+#include "linknow.h"
+#include <cstdio>
+#include <string>
+
+// Baked in by build.sh from the repo location; --sprites <dir> overrides it.
+#ifndef SPRITE_DIR
+#define SPRITE_DIR "../sdcard/mons"
+#endif
+static std::string g_spriteDir = SPRITE_DIR;
+void emuSetSpriteDir(const char *d) { g_spriteDir = d; }
+
+bool sdReady = true;
+bool sdDirty = false;
+// The firmware rescans version art when a pack lands over PUT. There is no card
+// here and no PUT path, so the flag never sets and the scan is a no-op -- but both
+// symbols are referenced from loop(), so they have to exist to link.
+bool sdArtDirty = false;
+void sdScanRegionArt(bool) {}
+// Nothing sets it here, as there is no PUT; transfer_test sets it by hand.
+bool sdThumbsDirty = false;
+// No PUT path here either; transfer_test sets sdTransferAt to stand in for one.
+uint32_t sdTransferAt = 0;
+uint16_t sdTransferFiles = 0;
+SdThumbs thumbs;
+
+static uint8_t *slurp(const std::string &path, uint32_t *size) {
+  FILE *f = fopen(path.c_str(), "rb");
+  if (!f) return nullptr;
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (n <= 0) { fclose(f); return nullptr; }
+  uint8_t *b = (uint8_t *)malloc(n);
+  if (!b || fread(b, 1, n, f) != (size_t)n) { free(b); fclose(f); return nullptr; }
+  fclose(f);
+  *size = (uint32_t)n;
+  return b;
+}
+
+// Two bugs lived in the first four lines of this, and both were INVISIBLE:
+//
+// 1. The path went into `char p[64]`. g_spriteDir is an ABSOLUTE path baked in at
+//    compile time, so on a normal checkout the result is ~69 characters --
+//    snprintf truncated it, fopen failed, and every sprite silently did not load.
+//    The only symptom was creatures drawn as bare dex numbers, which looks
+//    exactly like "no sprites installed". It is a std::string now, the same as
+//    SdThumbs::load() below, so there is no length to get wrong.
+//
+// 2. `dexNum > 999` -- a literal that did not grow with the dex. DEX_COUNT is
+//    1025, so the last 26 Digimon could never load however long the buffer was.
+//    CLAUDE.md § "uint8_t with a dex of 386" is a list of exactly this, and this
+//    is the same mistake wearing a different width.
+//
+// sprite_test catches both, and could not run at all until unpack_bundle.py
+// existed -- so a test written to catch a sprite-truncation bug was skipped on
+// every machine while a sprite-truncation bug sat two lines away from it.
+bool PmdMon::load(int16_t dexNum, bool variant) {
+  if (dexNum < 1 || dexNum > DEX_COUNT) return false;
+  unload();
+  char name[24];
+  snprintf(name, sizeof(name), "/p%s%03u.bin", variant ? "s" : "", (unsigned)dexNum);
+  uint32_t size = 0;
+  blob = slurp(g_spriteDir + name, &size);
+  if (!blob && variant) {
+    // No variant variant packed: fall back to the normal one, as the firmware does.
+    snprintf(name, sizeof(name), "/p%03u.bin", (unsigned)dexNum);
+    blob = slurp(g_spriteDir + name, &size);
+  }
+  if (!blob) return false;
+  if (size < 7 || memcmp(blob, "TPK2", 4) != 0) { unload(); return false; }
+
+  uint8_t nActs = blob[4];
+  memcpy(&palCount, blob + 5, 2);
+  if (palCount > 256 || (uint32_t)7 + palCount * 2 > size) { unload(); return false; }
+  memcpy(pal, blob + 7, palCount * 2);
+
+  const uint8_t *q = blob + 7 + palCount * 2, *end = blob + size;
+  for (uint8_t i = 0; i < nActs && q + 4 <= end; i++) {
+    uint8_t id = q[0], w = q[1], h = q[2], nf = q[3];
+    q += 4;
+    if (id >= PMD_NACTS || nf > 24) { unload(); return false; }
+    uint32_t bytes = (uint32_t)nf * 2 + (uint32_t)w * h * nf;
+    if (w == 0 || h == 0 || nf == 0 || q + bytes > end) { unload(); return false; }
+    PmdAct &a = acts[id];
+    a.w = w; a.h = h; a.frames = nf;
+    for (uint8_t k = 0; k < nf; k++) { a.ms[k] = q[0] | (q[1] << 8); q += 2; }
+    a.data = q;
+    q += (uint32_t)w * h * nf;
+    uint8_t base = 1;
+    for (uint8_t f = 0; f < nf; f++) {
+      const uint8_t *fr = a.data + (uint32_t)f * w * h;
+      for (int r = h - 1; r >= 0; r--) {
+        bool any = false;
+        for (int c = 0; c < w && !any; c++) if (fr[r * w + c] != 0xFF) any = true;
+        if (any) { if (r + 1 > base) base = r + 1; break; }
+      }
+    }
+    a.base = base;
+  }
+  dex = dexNum;
+  loaded = true;
+  return true;
+}
+
+void PmdMon::unload() {
+  if (blob) { free(blob); blob = nullptr; }
+  for (auto &a : acts) { a.w = a.h = a.frames = a.base = 0; a.data = nullptr; }
+  loaded = false;
+}
+
+bool SdThumbs::load() {
+  uint32_t size = 0;
+  // The firmware's twin reads into a fresh buffer too, so a failed reload keeps the old one.
+  uint8_t *next = slurp(g_spriteDir + "/thumbs.bin", &size);
+  if (!next) { Serial.println("emu: no thumbs.bin"); return false; }
+  if (size < 6 || memcmp(next, "TPTH", 4) != 0) { free(next); return false; }
+  free(data);
+  data = next;
+  memcpy(&count, data + 4, 2);
+  loaded = true;
+  Serial.printf("emu: thumbnails loaded: %u\n", count);
+  return true;
+}
+
+const uint8_t *SdThumbs::get(int16_t dex) const {
+  if (!loaded || dex < 1 || dex > count) return nullptr;
+  uint32_t off;
+  memcpy(&off, data + 6 + 4 * (dex - 1), 4);
+  return data + off;
+}
+
+bool SdMon::load(int16_t, bool) { return false; }   // legacy TPK1 path unused
+void SdMon::unload() { if (data) { free(data); data = nullptr; } loaded = false; }
+bool sdBegin(bool) {
+  Serial.printf("emu: sprites from %s\n", g_spriteDir.c_str());
+  return true;
+}
+bool sdSerialCommand(const String &) { return false; }
+
+// --- RTC / battery / PMU ---
+static uint32_t g_epoch = 0;
+bool rtcBegin() { return true; }
+uint32_t rtcEpoch() { return g_epoch + millis() / 1000; }
+void rtcSetEpoch(uint32_t e) { g_epoch = e - millis() / 1000; }
+bool batBegin() { return true; }
+void pmuEnablePanel() {}
+int batPercent() { return 87; }
+bool batCharging() { return false; }
+bool usbPresent() { return true; }
+void pwrSetup() {}
+void pwrPoll() {}
+bool pwrShortPressed() { return false; }
+// There is no PMU here, so neither of these can ever fire. What the firmware
+// does when they do is a hardware path -- see the flush in loop() -- and faking
+// it from a stub would only prove the stub. powerloss_test drives the same
+// flush through Pet directly instead.
+bool pwrLongPressed() { return false; }
+bool batLowWarning() { return false; }
+
+// --- NVS headroom (nvsinfo.cpp on the board) ---
+// The emulator's NVS is a std::map in Preferences.h: there is no partition to
+// exhaust, so this reports a healthy, fixed figure rather than pretending to
+// model page accounting it does not have.
+bool nvsEntryStats(uint32_t *used, uint32_t *available, uint32_t *total) {
+  if (used) *used = 0;
+  if (available) *available = 630;   // ~5 pages of a stock 20 KB nvs
+  if (total) *total = 630;
+  return true;
+}
+bool nvsLowOnSpace() { return false; }
+void nvsReport(const char *) {}
+
+// --- audio (silent) ---
+#ifndef TAMA_REAL_AUDIO
+void audioBegin() {}
+void sfxPlay(uint8_t) {}
+// The per-Digimon chirp. Counted rather than discarded, so the tests can prove a
+// cry was ASKED FOR at the right moments -- the emulator structurally cannot judge
+// how one SOUNDS (CLAUDE.md is explicit about that), but whether the game requests
+// one is ordinary logic and belongs under test.
+int g_emuCryCount = 0;
+int16_t g_emuCryDex = 0;
+void audioCry(int16_t dex) { g_emuCryDex = dex; g_emuCryCount++; }
+#endif
+// no radio here; the protocol itself is exercised by tests/link_test.cpp
+struct Link;
+// No radio here at all, which is why lossy_test drives Link directly instead
+// of going through this.
+bool linkNowBegin(Link *) { return false; }
+void linkNowEnd() {}
+bool linkNowUp() { return false; }
+void linkNowPoll() {}
+static LinkNowStats gNoStats;
+const LinkNowStats &linkNowStats() { return gNoStats; }
+// audio is silent here, but the sketch calls these, so they have to exist
+#ifndef TAMA_REAL_AUDIO
+static uint8_t g_emuVol = 7, g_emuMusic = 0;
+void audioMusic(uint8_t id) { g_emuMusic = id; }
+void audioSetVolume(uint8_t v) { g_emuVol = v > 10 ? 10 : v; }
+uint8_t audioVolume() { return g_emuVol; }
+void audioSetEnabled(bool on) { (void)on; }
+bool audioEnabled() { return true; }
+#endif
+
+// Why the last run ended. The tests link this file but not main_sdl.cpp, so the
+// state lives here and the GUI sets it after reading a simulated crash.
+static int g_resetReason = ESP_RST_POWERON;
+esp_reset_reason_t emuResetReason() { return g_resetReason; }
+void emuSetResetReason(int r) { g_resetReason = r; }
