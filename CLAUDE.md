@@ -5,6 +5,16 @@ the TamaPoke engine (socquique/TamaPoke -> DylanPDao -> eperdeme). Arduino/C++
 firmware + a Python asset pipeline + a browser-based flasher. Personal,
 non-commercial fan project: the code is MIT, the sprites are Bandai's.
 
+**Whose history this file tells.** This fork (`CantCodeJustImagine/Digitama`)
+restarted at 1.0.0 with 87 Digimon. Most of the war stories below come from the
+engine it inherited, which was a Pokemon game: release numbers v2.x-v4.x, issue
+numbers, dex sizes of 151/386/1025, Pokemon names and region names such as
+Sinnoh are THAT project's history, and some of the tools they mention
+(`check_sprites.py`) never came across. The lessons are why the code looks the
+way it does and they still apply; the numbers do not describe this repository.
+The same goes for history told in source comments. The live values are always in
+the generated headers (`DEX_COUNT`, `REGION_COUNT`, `GYM_REGIONS`).
+
 ## Layout
 
 | Path | What |
@@ -331,8 +341,9 @@ they surfaced over months rather than at once:
 - `TrainerMon::dex` -- Ver.3 rosters
 - `gen_moves.py`'s own `DEX_COUNT = 151` -- emitted a Ver.1-sized `LEARN_OFS`
 - the Digidex page cap `if (np > 9) np = 9` -- hid everything past dex 160
-- **`PmdMon::load(uint8_t)`** -- 131 Digimon drew Ver.1 sprites. A MARSHTOMP
-  (258) opened `p002.bin` and stood there as an KUWAGAMON. Shipped in v2.8.
+- **`PmdMon::load(uint8_t)`** -- 131 creatures drew Ver.1 sprites: dex 258
+  wrapped to 2, opened `p002.bin` and stood there as somebody else entirely.
+  Shipped in upstream v2.8.
 
 **The rule: anything holding a dex is `int16_t`, and any loop bound is
 `DEX_COUNT`.** Never the literal 151, never `uint8_t`.
@@ -349,8 +360,9 @@ and badges being stored additively: never reinterpret bytes that already exist.
 **The same trap wearing a table instead of a width:** a helper that keeps its
 own copy of the REGION list. Four were found at once when Ver.4 landed --
 `pack_bundle.py` (whose comment literally read "Must match REGIONS in
-digimon_data.py" while it did not, so `sprites-sinnoh.pak` could never be built),
-`pack_sprites.py`'s `span` dict (so `pack_sprites.py sinnoh` was not a command),
+digimon_data.py" while it did not, so upstream's fourth pack could never be built),
+`pack_sprites.py`'s `span` dict (so packing that region was not a command at all
+-- the packs are named `ver1` ... `ver5` here),
 `index.html`'s button ids hardcoded in THREE separate JS loops, and
 `renderRegionPick()`/`regionPickTap()` looping `GYM_REGIONS` in all three modes
 so **Ver.4 had no row in the Digidex chooser at all** while the gallery cycled
@@ -393,21 +405,20 @@ a VALUE that happens to hold rather than to the RULE.
   **vacuously true** when nothing was locked, and survived deleting the gate
   entirely. Only the negative-check caught it.
 
-**A DIRECTORY IS NOT COVERAGE.** `check_sprites.py` counted `sprite/NNNN`
-existing as "has art" and reported Ver.4 100%, while `pack_sprites.py` failed on
-0668 PYROAR -- whose directory holds only the form subdirs `0000`/`0001` with no
-`AnimData.xml` of its own. The table said complete and the packer disagreed;
-the packer was right. It now HEADs the actual sprite per Digimon (curl, in
-parallel -- the git tree API comes back truncated at 19 MB and urllib has no
-cert store here), which also found four more over-reported Digimon in Ver.4,
-Ver.4 and Ver.5. Coverage has to mean "can be drawn", because it decides what
-can hatch.
+**A DIRECTORY IS NOT COVERAGE.** Upstream's `check_sprites.py` (not part of
+this fork) counted a sprite directory existing as "has art" and reported a whole
+generation 100%, while `pack_sprites.py` failed on a creature whose directory
+held only form subdirectories and no animation data of its own. The table said
+complete and the packer disagreed; the packer was right, and fetching the actual
+sprite per creature found several more over-reported ones. Coverage has to mean
+"can be drawn", because it decides what can hatch -- here that answer is
+`noart.h`, which `pack_sprites.py` writes from what it really packed.
 
-**A tool that reports a partial fetch as fact is the same disease.**
-`check_sprites.py` paged the GitHub API and `break`'d on any failure, returning
-whatever it had -- so a rate-limited run said an entire generation had no art.
-Harmless while it only printed a table; not once that list decides which Digimon
-can hatch. It fails loudly now, and sanity-checks the total.
+**A tool that reports a partial fetch as fact is the same disease.** The same
+checker paged the GitHub API and `break`'d on any failure, returning whatever it
+had -- so a rate-limited run said an entire generation had no art. Harmless while
+it only printed a table; not once that list decides what can hatch. Anything
+that fetches must fail loudly and sanity-check its total.
 
 **A test at the END of a long suite is running in whatever state the suite left
 behind.** The long-press guard was first checked at the bottom of `touch_test`,

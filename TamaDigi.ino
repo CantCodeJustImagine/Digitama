@@ -1718,8 +1718,13 @@ void handleTouch() {
   // congelaba el loop entero; SensorLib no respeta el timeout de Wire.
   if (!gTouchIrq && !wasPressed) return;
   gTouchIrq = false;
-  int16_t x, y;
-  bool pressed = touch.getPoint(&x, &y, 1) > 0;
+  // getTouchPoints() is exactly what the deprecated getPoint() wrapped in
+  // SensorLib 0.4.x; only the first finger is used, as before. x and y are
+  // only read while pressed.
+  const TouchPoints &tp = touch.getTouchPoints();
+  const bool pressed = tp.getPointCount() > 0;
+  const int16_t x = pressed ? (int16_t)tp.getPoint(0).x : 0;
+  const int16_t y = pressed ? (int16_t)tp.getPoint(0).y : 0;
 
   // saco de entrenamiento: cada toque cuenta al instante (aporrear rapido)
   if (sackOpen) {

@@ -110,7 +110,8 @@ bool linkNowBegin(Link *l) {
   gLink = l;
   gLocked = false;
   gPeerAdded = false;
-  gHead = gTail = 0;
+  gHead = 0;   // two statements: chaining reads a volatile back (-Wvolatile)
+  gTail = 0;
   gStats = LinkNowStats();
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
