@@ -110,12 +110,12 @@ Zusammen sind das **87 Digimon**, jedes mit eigener farbiger Grafik. Die Bäume 
 
 ### Variante A: Web-Installer (empfohlen, nichts installieren)
 
-1. **https://joop0810.github.io/TamaDigi/web/** in **Chrome oder Edge** öffnen (Firefox und Safari können kein Web Serial).
+1. **https://cantcodejustimagine.github.io/Digitama/web/** in **Chrome oder Edge** öffnen (Firefox und Safari können kein Web Serial).
 2. Board per USB-C anstecken, **Install firmware** klicken und den Port wählen.
 3. Weiter unten die **Versions-Packs** (Sprites) auf die SD-Karte senden: Ver.1–Ver.5, einzeln oder alle.
 4. Fertig. Sprache am Gerät: Namen antippen → SETTINGS → Sprachzeile antippen (bis „DE“).
 
-**Eigener Fork:** Repo forken, in `web/editions.json`, `web/index.html` und `web/installer.js` `joop0810` durch deinen GitHub-Namen ersetzen, unter **Settings → Pages → Source** „GitHub Actions“ wählen und auf `main` pushen. Der Workflow kompiliert die Firmware in der Cloud und veröffentlicht deinen eigenen Installer.
+**Eigener Fork:** Repo forken, in `web/editions.json`, `web/index.html`, `web/installer.js` und `tools/local_installer.ps1` `CantCodeJustImagine/Digitama` (bzw. die Pages-Adresse) durch dein Repo ersetzen, unter **Settings → Pages → Source** „GitHub Actions“ wählen und auf `main` pushen. Der Workflow kompiliert die Firmware in der Cloud und veröffentlicht deinen eigenen Installer.
 
 ### Variante A2: `start.bat` (Windows, lokal)
 

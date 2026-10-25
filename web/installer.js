@@ -230,7 +230,7 @@ async function loadEditions() {
     version: normalizeVersion(currentManifest.version) || 'unknown',
     description: currentConfig.description || 'The build currently hosted by this GitHub Pages site.',
     notes: currentConfig.notes || 'This build has not been published as an immutable GitHub Release yet.',
-    releaseUrl: `https://github.com/${config.repository || 'joop0810/TamaDigi'}/releases`,
+    releaseUrl: `https://github.com/${config.repository || 'CantCodeJustImagine/Digitama'}/releases`,
   };
 
   let released = [];

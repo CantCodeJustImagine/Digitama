@@ -12,7 +12,7 @@
 # PowerShell 7. Kein Python, kein Arduino noetig.
 param(
   [int]$Port = 8765,
-  [string]$Pages = 'https://joop0810.github.io/TamaDigi/web',
+  [string]$Pages = 'https://cantcodejustimagine.github.io/Digitama/web',
   [switch]$NoDownload,
   [switch]$NoBrowser
 )
