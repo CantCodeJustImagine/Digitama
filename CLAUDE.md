@@ -371,6 +371,11 @@ the main screen was somebody else entirely.
 - `save_test` has to compare the field table against a store the FIRMWARE wrote,
   not one a restore produced, or it validates itself. It did exactly that until
   it was moved.
+- The native probe (`tests/native/native.ino`) still seeded the 1025-entry dex
+  of the engine this was forked from -- a dex bit at 145, a box from 258 up --
+  so in an 87-Digimon game it failed on EVERY run, and CI was red for a reason
+  nobody had looked at. Its fixture is derived from `DEX_COUNT` now. A fixture
+  that restates a number is the same disease as a layout literal.
 
 **The specific shape, found four times in one session:** an assertion pinned to
 a VALUE that happens to hold rather than to the RULE.
