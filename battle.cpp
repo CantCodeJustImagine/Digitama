@@ -256,7 +256,10 @@ uint8_t aiChooseMove(const Combatant &self, const Combatant &foe, bool smart) {
   if (!n) return 0;
   if (!smart) return legal[random(n)];
 
-  int16_t bestScore = -32768;
+  // int32_t, the same width as the score. Damage alone reaches 65535 and a kill
+  // adds 1000 on top, so an int16_t best wrapped a strong move's score negative
+  // and let the next, weaker move beat it -- see ai_test.
+  int32_t bestScore = INT32_MIN;
   uint8_t best = legal[0];
   for (uint8_t i = 0; i < n; i++) {
     uint8_t mv = legal[i];
@@ -295,7 +298,7 @@ uint8_t aiChooseMove(const Combatant &self, const Combatant &foe, bool smart) {
       if (m.ailment != AIL_NONE && foe.ailment == AIL_NONE)
         sc += m.ailChance / 4;
     }
-    if (sc > bestScore) { bestScore = (int16_t)sc; best = mv; }
+    if (sc > bestScore) { bestScore = sc; best = mv; }
   }
   return best;
 }

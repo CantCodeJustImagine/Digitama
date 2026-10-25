@@ -45,6 +45,12 @@
 #define LINK_JITTER_MS 200
 #define LINK_PAIR_TIMEOUT_MS 20000    // waiting for a peer that may not exist
 #define LINK_BATTLE_TIMEOUT_MS 12000  // mid-fight, where one is known to be there
+// How many times a finished host repeats END. It is the only packet that tells
+// the guest the fight is over, so it has to survive a lost frame -- but nothing
+// acknowledges it, and an END still arriving after the guest has tapped REMATCH
+// would knock it back to the result screen. A few resends (~3 s) is well inside
+// the guest's LINK_BATTLE_TIMEOUT_MS and long before anyone can reach REMATCH.
+#define LINK_END_RESENDS 6
 
 // An action is a move slot, or a switch with the high bit set. One message
 // rather than two, so turn matching and resend have a single path -- which is
@@ -116,6 +122,11 @@ struct Link {
   uint16_t buildTheirs = 0;
   uint16_t id = 0;             // breaks the tie when both sides offer to host
   uint16_t peerId = 0;
+  // OUR name, as the hello announces it. It used to be sent out of peerName,
+  // which begin() cleared and the first hello overwrote with THEIRS -- so every
+  // resent hello echoed the peer's own name back to it, and both screens could
+  // end up naming yourself as your rival.
+  char myName[LINK_NAME_LEN] = "";
   char peerName[LINK_NAME_LEN] = "";
 
   LinkMon mine[TRAINER_TEAM_MAX];
@@ -142,6 +153,7 @@ struct Link {
   uint32_t txAt = 0;
   uint32_t lastRx = 0;
   uint8_t resendSeq = 0;       // varies the resend interval, see LINK_JITTER_MS
+  uint8_t endResends = 0;      // END repeats left while DONE, see LINK_END_RESENDS
   bool sawRx = false;          // onPacket has no clock; tick() stamps it
   bool armed = false;
 

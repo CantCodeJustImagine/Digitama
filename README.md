@@ -132,7 +132,13 @@ Alles Weitere (Firmware flashen, Sprites auf die SD, Spielstand sichern) geht do
 - Board: **ESP32S3 Dev Module** · Flash **16MB** · PSRAM **OPI PSRAM** · Partition Scheme **16M Flash (3MB APP/9MB FATFS)** · USB CDC On Boot **Enabled**
 - Bibliotheken: GFX Library for Arduino 1.6.7, SensorLib 0.4.1, XPowersLib 0.3.3, ESP32-Core 3.3.11
 
+Wichtig: Der Ordner muss **`TamaDigi`** heißen, wie die `TamaDigi.ino`. Arduino
+verweigert sonst den Build („main file missing from sketch“), und ein normales
+`git clone` dieses Forks heißt `Digitama`. Also entweder passend klonen, oder
+`bash tools/flash.sh -p <Port>` nehmen: das baut aus einer richtig benannten Kopie.
+
 ```bash
+git clone https://github.com/CantCodeJustImagine/Digitama TamaDigi && cd TamaDigi
 FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
 arduino-cli compile --fqbn "$FQBN" .
 arduino-cli upload -p COM5 --fqbn "$FQBN" .
@@ -179,7 +185,7 @@ TAMA_TEST_BACKEND=host bash tools/emu/tests/run.sh           # alle Suiten im Em
 TAMA_TEST_BACKEND=host bash tools/emu/tests/run.sh digivolve # nur eine
 ```
 
-48 Suiten, darunter `digivolve_test` (alle Zweige von Ver.1, Siege, Stufenuhr, Megas in jeder Version, kein Zweig zu einem Digimon ohne Sprite), Kampf, Speichern bei Stromausfall, Web-Installer und Touch. GitHub Actions führt sie bei jedem Push aus und kompiliert dabei auch die echte ESP32-Firmware.
+49 Suiten, darunter `digivolve_test` (alle Zweige von Ver.1, Siege, Stufenuhr, Megas in jeder Version, kein Zweig zu einem Digimon ohne Sprite), Kampf, Speichern bei Stromausfall, Web-Installer und Touch. GitHub Actions führt sie bei jedem Push aus und kompiliert dabei auch die echte ESP32-Firmware.
 
 ## Serielle Konsole (115200)
 

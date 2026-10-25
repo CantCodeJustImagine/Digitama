@@ -122,17 +122,16 @@ bool SdThumbs::load() {
   if (size < 6 || memcmp(next, "TPTH", 4) != 0) { free(next); return false; }
   free(data);
   data = next;
+  this->size = size;
   memcpy(&count, data + 4, 2);
   loaded = true;
   Serial.printf("emu: thumbnails loaded: %u\n", count);
   return true;
 }
 
+// The firmware's twin, through the same bounds rule -- see thumbBlobAt().
 const uint8_t *SdThumbs::get(int16_t dex) const {
-  if (!loaded || dex < 1 || dex > count) return nullptr;
-  uint32_t off;
-  memcpy(&off, data + 6 + 4 * (dex - 1), 4);
-  return data + off;
+  return loaded ? thumbBlobAt(data, size, count, dex) : nullptr;
 }
 
 bool SdMon::load(int16_t, bool) { return false; }   // legacy TPK1 path unused

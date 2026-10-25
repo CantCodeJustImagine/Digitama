@@ -15,6 +15,7 @@
 #include "Preferences.h"
 #include "pet.h"
 #include "party.h"
+#include "moves.h"
 #include <cstdio>
 #include <cstring>
 #include <chrono>
@@ -32,7 +33,8 @@ extern uint32_t confirmUntil;
 extern uint8_t dimStage;
 extern bool holdFired;
 extern Pet pet;
-extern bool partyOpen, boxOpen, movePickOpen, releaseConfirm;
+extern bool partyOpen, boxOpen, movePickOpen, releaseConfirm, partyPick;
+void onSwipe(int); void onSwipeV(int);
 extern uint8_t partyDetail, boxDetail, boxSwapFrom, boxSel;
 
 static int bad=0;
@@ -237,6 +239,70 @@ int main(){
     hold(233,200,3400);                     // the creature itself
     ck(confirmUntil!=0, "the hold STILL works on the main screen, where it belongs");
     confirmUntil=0;
+  }
+
+  // ---- a creature waiting for a slot is let go by the button, not by a gesture
+  //
+  // With the party AND the box full, a farewell's creature waits on the party
+  // screen for the player to pick who it replaces, or to press LET GO. Every
+  // swipe -- the tile axis, and down for back -- and a tap on the top band used
+  // to let it go as well, permanently and without a word: the one creature that
+  // finished its whole life, lost to the gesture used to move between screens.
+  {
+    clearAll();
+    for (int i=0;i<PARTY_SLOTS;i++) party.slots[i]=mon(10+i,30,"PARTY");
+    for (int i=0;i<BOX_SLOTS;i++) party.box[i]=mon(20+(i%10),30,"BOXED");
+    party.save();
+    pet.setEnded(mon(5,73,"VETERAN"), CER_FAREWELL);
+    pump(2);
+    ck(partyPick && partyOpen, "a full party and box ask where the newcomer goes");
+    onSwipe(1); onSwipe(-1);
+    ck(partyPick && pet.endedKind==CER_FAREWELL && pet.endedMon.dex==5,
+       "a horizontal swipe does not let it go");
+    onSwipeV(1);
+    ck(partyPick && pet.endedKind==CER_FAREWELL, "nor does swiping down for back");
+    partyTap(233, 20);
+    ck(partyPick && pet.endedKind==CER_FAREWELL, "nor a tap that grazes the top band");
+    Pet q; q.begin();
+    ck(q.endedKind==CER_FAREWELL && q.endedMon.dex==5,
+       "and it is still waiting after a reboot");
+    partyTap(233, 398);                            // the red LET GO button
+    ck(!partyPick && pet.endedKind==CER_NONE, "the LET GO button still lets it go");
+    clearAll();
+  }
+
+  // ---- a learn offer answers only while it is actually on the panel
+  //
+  // A level-up raises the offer in the background. render() draws the party
+  // screen (and the Digidex, the keyboard, the minigames...) over it, but onTap()
+  // checked the offer first -- so taps on the screen you could SEE went to a
+  // prompt you could not, and party slot 0 sits on top of learn row 0: one tap
+  // meant to open a sheet silently overwrote the live creature's first move.
+  {
+    clearAll();
+    party.slots[0]=mon(25,30,"PIKA");
+    party.save();
+    if (pet.isEgg()) pet.dbgHatchAs(6,false);
+    while (pet.hasLearnOffer()) pet.declineLearn();
+    if (pet.sleeping) pet.toggleLight();
+    pet.relearnFromLevel();
+    uint8_t offer=0;
+    for (uint8_t mv=1; mv<MOVE_COUNT && !offer; mv++) if (!pet.knowsMove(mv)) offer=mv;
+    uint8_t before[MOVE_SLOTS]; memcpy(before, pet.moves, sizeof(before));
+    pet.learnQueue[0]=offer; pet.learnQCount=1;
+    partyOpen=true;
+    tap(440,440);                                  // wake, off every control
+    ck(!strcmp(SCREEN_NAME[uiCurrentScreen()],"party"),
+       "with an offer pending, the party screen is what is on the panel");
+    tap(SLOT_X(0), SLOT_Y(0));
+    ck(partyDetail==1, "so a tap on party slot 0 opens its sheet");
+    ck(pet.hasLearnOffer() && !memcmp(before, pet.moves, sizeof(before)),
+       "and does not answer the hidden prompt by overwriting a move");
+    clearAll();
+    ck(!strcmp(SCREEN_NAME[uiCurrentScreen()],"learn"),
+       "back on the main screen the prompt is what shows");
+    tap(233, 104+25);                              // learn row 0
+    ck(!pet.hasLearnOffer() && pet.moves[0]==offer, "and there it is answered as before");
   }
 
   printf("%s\n", bad?"FAILURES":"all good");

@@ -48,10 +48,30 @@ struct PmdMon {
   bool has(uint8_t a) const { return loaded && a < PMD_NACTS && acts[a].frames > 0; }
 };
 
+// The bounds rule for thumbs.bin, ONCE, for the board's loader and the emulator's
+// twin alike. The file says how many entries it has and where each one starts,
+// and get() used to believe both: a count larger than the offset table, or an
+// offset pointing past the end of the file, read straight off the end of the
+// PSRAM buffer -- on a board, a crash every time the Digidex opened. Returns the
+// entry for `dex`, or nullptr unless the file really holds a whole one there.
+static inline const uint8_t *thumbBlobAt(const uint8_t *data, uint32_t size,
+                                         uint16_t count, int16_t dex) {
+  if (!data || dex < 1 || dex > count) return nullptr;
+  const uint32_t at = 6u + 4u * (uint32_t)(dex - 1);
+  if (at + 4u > size) return nullptr;
+  uint32_t off;
+  memcpy(&off, data + at, 4);
+  if (off > size || size - off < 3u) return nullptr;
+  const uint32_t need = 3u + 2u * data[off + 2] + (uint32_t)data[off] * data[off + 1];
+  if (size - off < need) return nullptr;
+  return data + off;
+}
+
 // miniaturas de la galeria (thumbs.bin entero en PSRAM)
 struct SdThumbs {
   bool loaded = false;
   uint8_t *data = nullptr;
+  uint32_t size = 0;    // of `data`, so get() can bound every read by it
   uint16_t count = 0;
   bool load();  // replaces what is loaded only if the new file reads back whole
   const uint8_t *get(int16_t dex) const;  // blob: w,h,palCount,pal[],idx[]

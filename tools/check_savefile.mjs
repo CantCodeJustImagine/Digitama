@@ -30,7 +30,13 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
+// Produced by the CURRENT firmware -- see CLAUDE.md for the exact console script.
+// It used to be a capture from a build that still wrote the ~50 legacy keys, so
+// every label test here passed against keys no current board exports, while a
+// real backup was labelled "no details". legacy.tpsave is that old capture,
+// kept because a player may still hold one.
 const golden = readFileSync(join(root, 'tools/fixtures/golden.tpsave'), 'utf8');
+const legacyFixture = readFileSync(join(root, 'tools/fixtures/legacy.tpsave'), 'utf8');
 
 let bad = 0;
 function ck(ok, what) {
@@ -62,16 +68,41 @@ ckThrows(() => hexToBytes('ZZ'), 'non-hex', 'non-hex digits are refused');
 
 // ---- the golden fixture, produced by the firmware itself
 const parsed = verifyBackup(golden);
-ck(parsed.blob.length === 2128, `the firmware's own export verifies (${parsed.blob.length} bytes)`);
+ck(parsed.blob.length > 0, `the firmware's own export verifies (${parsed.blob.length} bytes)`);
 ck(parsed.declared === parsed.blob.length,
    'and the declared byte count matches the hex that arrived');
 ck(parsed.commands.at(-1) === 'IMPORT', 'the commit line is last');
 ck(parsed.commands.filter((c) => c === 'IMPORT').length === 1, 'and appears exactly once');
-ck(parsed.fields > 40, `the field count reads back sensibly (${parsed.fields})`);
+// The keys actually in it, walked off the wire format rather than assumed.
+const keysIn = (blob) => {
+  const keys = [];
+  let at = 8;
+  while (at + 4 <= blob.length - SAVE_CRC_BYTES) {
+    const klen = blob[at];
+    keys.push(String.fromCharCode(...blob.subarray(at + 1, at + 1 + klen)));
+    at += 1 + klen + 1;
+    at += 2 + (blob[at] | (blob[at + 1] << 8));
+  }
+  return keys;
+};
+const goldenKeys = keysIn(parsed.blob);
+ck(parsed.fields === goldenKeys.length, `the field count matches the fields present (${parsed.fields})`);
+ck(['petA', 'petB', 'plyA', 'plyB'].every((k) => goldenKeys.includes(k)) && !goldenKeys.includes('dexn'),
+   'a current export carries the checkpoints and none of the legacy keys');
 
 const described = describeBackup(parsed.blob);
-console.log(`      label from the blob: dex=${described.dex} age=${described.ageMinutes}`);
+console.log(`      label from the blob: dex=${described.dex} age=${described.ageMinutes} trainer=${described.trainer}`);
 ck(described.dex === 6, 'the label reads the species the fixture was built with (TYRANNOMON)');
+// LVL 29 then LVL 30: the two pet slots differ, so this also proves the NEWEST
+// complete record is the one read -- the older slot holds level 29.
+ck(described.ageMinutes === 29 * 60, 'and its age from the NEWER of the two checkpoint slots (level 30)');
+ck(described.trainer === 'ASH', 'and the tamer name out of the player checkpoint');
+
+// An old capture labels from the legacy keys it does carry.
+{
+  const old = describeBackup(verifyBackup(legacyFixture).blob);
+  ck(old.dex === 6 && old.ageMinutes === 29 * 60, 'a backup from an older build is still labelled');
+}
 
 // ---- truncation: the case that used to pass
 // A capture that stops early still ends with a plausible commit line. Dropping a
@@ -179,6 +210,7 @@ ckThrows(() => verifyBackup('hello\nIMPORT'), 'unrecognised',
   const summary = saveSummary(described, dex);
   ck(summary.includes('TYRANNOMON Lv.30'),
      `the fixture (EGG 6, LVL 30 on the firmware) is labelled with its species and level: "${summary}"`);
+  ck(summary.startsWith('ASH'), 'and with the tamer it belongs to');
   ck(saveSummary(described, null).includes('dex 6'), 'and without the table it is still a number');
   ck(saveSummary({ dex: -1 }, dex) === 'an egg', 'an egg says so');
   ck(saveSummary({}, dex) === 'no details', 'and a blob with nothing readable does not throw');

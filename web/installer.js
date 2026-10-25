@@ -1,6 +1,6 @@
 import {
   verifyBackup, describeBackup, sendBackup, saveSummary, backupFileName,
-} from './savefile.js?v=46404cdccf162854';
+} from './savefile.js?v=3302d454307daf28';
 import { parsePak, verifyPak, packIsCurrent, probeSum, installFile } from './packs.js?v=2d4d719f12e1ccb6';
 
 const byId = (id) => document.getElementById(id);
@@ -1183,7 +1183,15 @@ function historyLabel(row) {
   const when = new Date(row.at).toLocaleString(undefined, {
     year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   });
-  const bits = [saveSummary({ trainer: row.trainer, dex: row.dex, ageMinutes: row.ageMinutes }, dexInfo)];
+  let described = { trainer: row.trainer, dex: row.dex, ageMinutes: row.ageMinutes };
+  // A row stored before describeBackup() learned to read the checkpoints holds an
+  // empty label for a perfectly good save -- every backup from current firmware
+  // did. The whole backup is in the row, so read it again rather than keep
+  // showing "no details" for it forever.
+  if (!row.trainer && (row.dex === null || row.dex === undefined) && row.text) {
+    try { described = describeBackup(verifyBackup(row.text).blob); } catch { /* keep what was stored */ }
+  }
+  const bits = [saveSummary(described, dexInfo)];
   bits.push(`${row.bytes} bytes`);
   if (row.board) bits.push(`board ${row.board}`);
   if (row.note) bits.push(row.note);

@@ -323,6 +323,7 @@ void Pet::begin() {
   // still a fresh egg now, because there is nothing to load, but saveHealthy()
   // is false and the panel says so.
   opened = prefs.begin("tamadigi", false);
+  live = true;
   if (!opened)
     Serial.println("save: NVS namespace would not open -- NOTHING WILL BE SAVED");
   saveGeneration = 0;
@@ -377,6 +378,11 @@ void Pet::newEgg() {
   mistakeCooldown = 0;
   sleeping = false;
   frozen = false;
+  // The previous creature's "keep form" / "stay together". Both are compared
+  // against the NEW creature's level and age, so leaving them set held its first
+  // digivolution and its farewell back by however far the old one had got.
+  evoDeclinedLv = 0;
+  farDeclinedAge = 0;
   save();
 }
 
@@ -441,18 +447,23 @@ void Pet::syncClock(uint32_t nowEpoch) {
   }
 
   for (uint32_t i = 0; i < mins; i++) {
-    ageMinutes++;
+    // A frozen companion does not age -- tick() has always honoured that, and
+    // this loop did not, so a night with the board off levelled it up.
+    if (!frozen) ageMinutes++;
     if (isEgg()) {
       if (ageMinutes >= 3) hatch();  // eclosiona en tu ausencia
       continue;
     }
+    // The cadence clock: the age for anything that ages, the loop itself for a
+    // frozen companion, whose age would otherwise fire every cadence each minute.
+    const uint32_t clk = frozen ? i + 1 : ageMinutes;
     if (sleeping) {  // descanso: baja lento y con suelo, igual que en vivo
       energy = clamp100(energy + 6);
-      if (ageMinutes % 2 == 0) {
+      if (clk % 2 == 0) {
         fullness = dropTo(fullness, 1, 30);
         joy = dropTo(joy, 1, 35);
       }
-      if (ageMinutes % 3 == 0) hygiene = dropTo(hygiene, 1, 45);
+      if (clk % 3 == 0) hygiene = dropTo(hygiene, 1, 45);
       continue;
     }
     fullness = dropTo(fullness, 2, 15);
@@ -500,6 +511,11 @@ void Pet::tick() {
 
   applyAutoSleep();   // put down at 21:00 still goes to bed at 22:00
 
+  // Every cadence below keys off this, never off ageMinutes directly. A frozen
+  // companion's age does not move, so `ageMinutes % 3 == 0` was true on every
+  // tick: it shed weight three times as fast, drained twice as fast in its
+  // sleep, and played the level-up jingle every awake minute.
+  const uint32_t clk = frozen ? ++frozenClock : ageMinutes;
 
   // el sueño es descanso: la energia se recupera y las necesidades bajan MUCHO
   // mas lento que despierto y con suelo (amanece pidiendo algo de mimo, no a
@@ -507,19 +523,20 @@ void Pet::tick() {
   // El peso aun se quema y el descanso cuenta para la DEF (ver defTick).
   if (sleeping) {
     energy = clamp100(energy + 6);
-    if (weight > 0 && ageMinutes % 3 == 0) weight--;
-    if (ageMinutes % 2 == 0) {                 // ~4x mas lento que despierto
+    if (weight > 0 && clk % 3 == 0) weight--;
+    if (clk % 2 == 0) {                        // ~4x mas lento que despierto
       fullness = dropTo(fullness, 1, 30);
       joy = dropTo(joy, 1, 35);
     }
-    if (ageMinutes % 3 == 0) hygiene = dropTo(hygiene, 1, 45);
+    if (clk % 3 == 0) hygiene = dropTo(hygiene, 1, 45);
     defTick(true);  // descansar tambien es bienestar: cuenta para la DEF
     checkMedals();  // aun puede cruzar un nivel por edad mientras duerme
     if (++ticksSinceSave >= 5) pendingSave = true;
     return;
   }
 
-  if (ageMinutes % MINUTES_PER_LEVEL == 0) sfxPlay(SFX_LEVEL);  // subio de nivel (despierto)
+  // subio de nivel (despierto) -- a frozen companion never does
+  if (!frozen && ageMinutes % MINUTES_PER_LEVEL == 0) sfxPlay(SFX_LEVEL);
 
   fullness = clamp100(fullness - 2);
   energy = clamp100(energy - 1);
@@ -528,7 +545,7 @@ void Pet::tick() {
   hygiene = clamp100(hygiene - 1 - 4 * poops);
   // el sobrepeso da pereza: la energia cae el doble
   if (weight > 50) energy = clamp100(energy - 1);
-  if (weight > 0 && ageMinutes % 3 == 0) weight--;
+  if (weight > 0 && clk % 3 == 0) weight--;
 
   defTick(false);  // la calma forja la defensa
 
@@ -600,6 +617,9 @@ void Pet::reviveFrom(const PartyMon &m) {
   hygiene = 100;
   poops = 0;
   frozen = true;
+  frozenClock = 0;
+  evoDeclinedLv = 0;
+  farDeclinedAge = 0;
   strncpy(nick, m.nick, sizeof(nick) - 1);
   nick[sizeof(nick) - 1] = 0;
   registerSpecies(speciesId);
@@ -666,6 +686,7 @@ void Pet::switchTo(const PartyMon &m) {
   learnQCount = 0;
   frozen = false;          // the whole point: it ages and levels again
   wins = 0;                // a party record does not carry its stage's wins
+  farDeclinedAge = 0;      // not stored in the record: re-offer rather than inherit
   if (m.hasCareState()) {
     ageMinutes = m.ageMinutes;
     fullness = m.fullness;
@@ -1049,7 +1070,7 @@ void Pet::checkMedals() {
     for (uint16_t m = gained; m; m &= (m - 1)) totalMedals++;
     newMedal = gained;
     medalUntil = millis() + 4000;
-    if (!sleeping) sfxPlay(SFX_MEDAL);
+    if (!sleeping && live) sfxPlay(SFX_MEDAL);   // an opponent's MED_FINAL is silent
     save();
   }
 }
@@ -1277,9 +1298,13 @@ uint8_t Pet::pendingLearnables(uint8_t *out, uint8_t max) const {
   if (isEgg() || !out || !max) return 0;
   uint8_t lvl = level(), n = learnCount(speciesId), w = 0;
   for (uint8_t i = 0; i < n && w < max; i++) {
-    if (learnLevel(speciesId, i) > lvl) break;
+    // moveUnlockLevel(), the single answer, and `continue` rather than `break`:
+    // the raw learnLevel() is 0 for a TM and the list is not ordered for one, so
+    // this was the last path still able to offer FIRE BLAST to a level 22 AGUMON.
+    // Today's learnsets carry no TMs, which is the only reason it never did.
+    if (moveUnlockLevel(speciesId, i) > lvl) continue;
     uint8_t mv = learnMove(speciesId, i);
-    if (knowsMove(mv)) continue;
+    if (!mv || mv >= MOVE_COUNT || knowsMove(mv)) continue;
     bool dup = false;                     // do not offer the same move twice
     for (uint8_t j = 0; j < w; j++)
       if (out[j] == mv) { dup = true; break; }
@@ -1443,7 +1468,10 @@ void Pet::hatch() {
   lastLearnLevel = 0;
   checkLearnGates();
   checkMedals();     // por si nace ya en forma final (legendario)
-  sfxPlay(SFX_HATCH);
+  // Only the creature on the panel. Every opponent is built by hatching a
+  // scratch Pet, so this used to play at the start of each fight and again for
+  // every replacement a boss sent out.
+  if (live) sfxPlay(SFX_HATCH);
   save();
 }
 
@@ -1573,8 +1601,9 @@ uint8_t Pet::rewardTraining(uint8_t amount, uint8_t &which) {
 
 uint8_t Pet::trainSpeed(uint16_t hits) {
   if (ceremony != CER_NONE || isEgg()) return 0;
-  uint8_t gain = hits / 2;          // ~2 reactions = 1 point
-  if (gain > 18) gain = 18;         // same per-session ceiling as the bag
+  // Capped while still a uint16_t: hits / 2 assigned straight to a uint8_t wraps
+  // at 512 hits. Out of reach in a 15 s session, but the cap should not depend on it.
+  uint8_t gain = (uint8_t)min<uint16_t>(hits / 2, 18);   // ~2 reactions = 1 point, same ceiling as the bag
   uint8_t before = trSpe;
   uint8_t v = trSpe + gain;
   trSpe = v > trMaxSpe() ? trMaxSpe() : v;   // el IV pone el techo
@@ -1597,8 +1626,9 @@ uint8_t Pet::trainSpeed(uint16_t hits) {
 
 uint8_t Pet::trainStrength(uint16_t hits) {
   if (ceremony != CER_NONE || isEgg()) return 0;
-  uint8_t gain = hits / 4;          // ~4 golpes = 1 punto de entrenamiento
-  if (gain > 18) gain = 18;         // tope por sesion: la FUE se forja a fuego lento
+  // ~4 hits = 1 point, at most 18 a session -- capped while still a uint16_t, as
+  // in trainSpeed(): hits / 4 assigned straight to a uint8_t wraps at 1024 hits.
+  uint8_t gain = (uint8_t)min<uint16_t>(hits / 4, 18);
   uint8_t before = trAtk;
   uint8_t v = trAtk + gain;
   trAtk = v > trMaxAtk() ? trMaxAtk() : v;  // el IV pone el techo
@@ -1628,8 +1658,9 @@ uint8_t Pet::playMemo(uint16_t best) {
   if (ceremony != CER_NONE || isEgg()) return 0;
   // A longer sequence is worth more, with a ceiling: the game gets harder on its
   // own, so the reward does not also need to run away.
-  uint8_t gain = (uint8_t)(best * 4);
-  if (gain > 40) gain = 40;
+  // Capped BEFORE narrowing: (uint8_t)(best * 4) wraps at 64. MEMO_MAX keeps a
+  // session far below that today; this keeps it right if MEMO_MAX ever grows.
+  uint8_t gain = (uint8_t)min<uint32_t>((uint32_t)best * 4, 40);
   const uint8_t before = joy;
   joy = clamp100(joy + gain);
   gain = joy - before;
@@ -1825,6 +1856,9 @@ bool Pet::loadCoreSnapshot() {
       // means "predates care state". A longer one is truncated.
       memcpy(&endedMon, buf + PET_TAIL_MON,
              monLen < sizeof(PartyMon) ? monLen : sizeof(PartyMon));
+      // The party slot this lands in, and the chooser that draws it, index
+      // DEX_TBL and MOVE_TBL with it -- the same check the party itself gets.
+      partyMonSanitize(endedMon);
       uint8_t kind = buf[PET_TAIL_KIND];
       // Only the two endings that actually bank a creature, and only if there
       // is one: a junk kind must not park an empty record in the chooser.
@@ -1856,6 +1890,12 @@ bool Pet::loadCoreSnapshot() {
   careMistakes = snapshot.careMistakes; sleeping = snapshot.sleeping != 0;
   lastEnd = snapshot.lastEnd; frozen = snapshot.frozen != 0; bond = snapshot.bond;
   wins = snapshot.wins;
+  // The ceremony an early retire belongs to lives in RAM only, so a record
+  // that says "retiring" describes a creature that is in fact still alive -- a
+  // power cut landed during the ten seconds it takes. Believing the flag made
+  // that creature's eventual REAL farewell bank nothing and charge the next egg
+  // a day. Nothing finished, so nothing is owed; see carryover_test.
+  retirePending = false;
   memcpy(nick, snapshot.nick, sizeof(nick));
   nick[sizeof(nick) - 1] = 0;
   return true;
@@ -1919,7 +1959,9 @@ void Pet::load() {
   starterPick = prefs.getBool("stpk", false);
   evoPen = prefs.getUChar("evop", 0);
   sleepAuto = prefs.getUChar("slpa", SLEEP_NONE);
-  retirePending = prefs.getBool("rtpn", false);
+  // The legacy "rtpn" key is deliberately NOT believed: as in loadCoreSnapshot(),
+  // a retire cannot survive the reboot its ceremony did not.
+  retirePending = false;
   loadBlob(prefs, "dexsh", dexVariantReg, sizeof(dexVariantReg));
   lastSeenEpoch = prefs.getUInt("seen", 0);
   ageMinutes = prefs.getUInt("age", 0);
@@ -2015,6 +2057,17 @@ void Pet::load() {
     // checkpoints existed.
     Serial.println("save: no pet checkpoint yet, migrating from legacy keys");
   }
+  // The creature's own dex numbers, checked like the party's always were. Nearly
+  // everything indexes DEX_TBL with speciesId -- the relearn just below first --
+  // and nothing re-checked it after a load, so a number from a build with more
+  // Digimon, or from nowhere at all, was an out-of-bounds read from boot onward.
+  // Not a Digimon means not a creature: it comes back as the egg it would be.
+  if (speciesId == 0 || speciesId < -1 || speciesId > DEX_COUNT) {
+    Serial.printf("save: species %d is not a Digimon; starting from the egg\n", speciesId);
+    speciesId = -1;
+    frozen = false;
+  }
+  if (eggTarget < 1 || eggTarget > DEX_COUNT) eggTarget = pickEggSpecies();
   if (!isEgg() && moveCount() == 0 && lastLearnLevel == 0) {
     // save from before moves existed: hand it the set it should already have
     // rather than a queue of every gate it ever passed

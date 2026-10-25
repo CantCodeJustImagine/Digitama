@@ -2,6 +2,7 @@
   "native": [
     "ai_test",
     "battle_test",
+    "carryover_test",
     "clock_test",
     "crc32_test",
     "cry_test",

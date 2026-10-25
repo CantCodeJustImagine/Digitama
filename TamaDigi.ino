@@ -1543,6 +1543,13 @@ void handleSerial() {
     pet.rename(line.substring(5).c_str());
     Serial.printf("nick=%s\n", pet.nick);
     Serial.println("DONE");
+  } else if (line.startsWith("TRAINER ")) {
+    // The player's name, NICK's twin. It is what the installer labels a backup
+    // with, so the golden fixture needs one -- and a name otherwise only arrives
+    // through the on-screen keyboard, which no fixture can type.
+    pet.renameTrainer(line.substring(8).c_str());
+    Serial.printf("trainer=%s\n", pet.trainerName);
+    Serial.println("DONE");
   } else if (line == "CAREDAY") {  // simula un dia nuevo cuidado (pruebas)
     pet.setClock(pet.lastSeenEpoch + 86400);
     pet.caress();
@@ -1861,10 +1868,12 @@ void onSwipeV(int dir) {
   if (playerOpen) { if (back) uiTileGo(TILE_PET); return; }
   if (partyOpen) {
     if (partyDetail) { if (back) partyDetail = 0; return; }
-    if (back) {
-      if (partyPick) { partyPick = false; pet.clearEnded(); }
-      uiTileGo(TILE_PET);
-    }
+    // A creature waiting for a slot is NOT dismissed by a gesture. This used to
+    // let it go for good -- the creature that just finished its whole life,
+    // gone on a swipe with no question asked, when the screen has a red LET GO
+    // button for exactly that. Only the button may; see partyTap().
+    if (partyPick) { if (back) sfxPlay(SFX_DENY); return; }
+    if (back) uiTileGo(TILE_PET);
     return;
   }
   if (cardOpen) { if (back) cardOpen = false; return; }
@@ -2191,9 +2200,12 @@ void partyTap(int16_t x, int16_t y) {
     sfxPlay(SFX_TAP);
     return;
   }
-  // exit button, and the top band, both always work
-  if ((y >= PARTYCLOSE_Y && y <= PARTYCLOSE_Y + PARTYCLOSE_H &&
-       x >= PARTYCLOSE_X && x <= PARTYCLOSE_X + PARTYCLOSE_W) || y < 34) {
+  // The exit button always works. The top band is a shortcut for CLOSE only:
+  // while a creature waits for a slot that button reads LET GO, and a tap that
+  // grazes the bezel is not a decision to give a creature up.
+  const bool onExit = y >= PARTYCLOSE_Y && y <= PARTYCLOSE_Y + PARTYCLOSE_H &&
+                      x >= PARTYCLOSE_X && x <= PARTYCLOSE_X + PARTYCLOSE_W;
+  if (onExit || (y < 34 && !partyPick)) {
     if (partyPick) {                 // declined the swap: the pet is let go
       partyPick = false;
       pet.clearEnded();
@@ -2255,7 +2267,9 @@ void onSwipe(int dir) {
     // A sheet drawn on top of a tile closes first; the axis is underneath it.
     if (galleryDetail) { galleryDetail = 0; galleryPmd.unload(); galleryDirty = true; return; }
     if (partyDetail) { partyDetail = 0; return; }
-    if (partyPick) { partyPick = false; pet.clearEnded(); }
+    // The axis bumps here: leaving would have to let the waiting creature go,
+    // and that is the LET GO button's decision, never a swipe's.
+    if (partyPick) { sfxPlay(SFX_DENY); return; }
     if (pet.ceremony || confirmUntil) return;
     int n = t - dir;   // the content follows the finger
     // IT BUMPS. This is the whole point of the axis: a horizontal swipe can no
@@ -2418,7 +2432,12 @@ void onTap(int16_t x, int16_t y) {
     gymOpen = false;
     return;
   }
-  if (pet.hasLearnOffer()) {
+  // Only while the prompt is actually ON THE PANEL. A level-up raises the offer
+  // in the background, and render() draws the party, the Digidex, the keyboard,
+  // the clock, the training menu, the move picker and every minigame over it --
+  // so this used to swallow every tap on those screens, and a tap that happened
+  // to land on an invisible move row replaced that move for good.
+  if (pet.hasLearnOffer() && uiCurrentScreen() == SCR_LEARN) {
     for (int i = 0; i < MOVE_SLOTS; i++) {
       int ry = LEARN_ROW_Y(i);
       if (x < 70 || x > 396 || y < ry || y > ry + 50) continue;
@@ -2809,26 +2828,34 @@ RTC_NOINIT_ATTR uint32_t gCrumbHeap;
 
 
 // Which screen is on the panel RIGHT NOW, in the same order render() tests.
+//
+// IN THE SAME ORDER, LITERALLY. It claimed to be and was not: the card, the
+// minigames and the training menu sat at different depths here than in
+// render(), which only matters when two states hold at once -- and the one that
+// arrives on its own is a learn offer, raised by a level-up in the background.
+// render() draws a minigame, the party, the Digidex or the keyboard OVER that
+// offer, so this has to name them too, or onTap() answers a prompt nobody can
+// see. Keep the two lists side by side when either changes.
 uint8_t uiCurrentScreen() {
   if (transferMode()) return SCR_TRANSFER;
   if (pet.awaitingStarter()) return starterRegionDone ? SCR_STARTER : SCR_REGION;
   if (galleryOpen) return galleryPick ? SCR_DEXPICK : SCR_GALLERY;
   if (movePickOpen) return SCR_MOVEPICK;
   if (partyOpen) return boxOpen ? SCR_BOX : SCR_PARTY;
+  if (gameOpen) return SCR_GAME;
   if (bagOpen) return SCR_BAGSCR;
+  if (sackOpen || spdOpen || memoOpen) return SCR_GAME;
+  if (trainOpen) return SCR_TRAIN;
   if (kbOpen) return SCR_KEYBOARD;
-  if (cardOpen) return SCR_CARD;
-  if (playerOpen) return SCR_PLAYER;
   if (clockOpen) return SCR_CLOCK;
-  if (btlWinUntil) return SCR_WIN;
-  if (battleOpen) return SCR_BATTLE;
+  if (battleOpen) return btlWinUntil ? SCR_WIN : SCR_BATTLE;   // renderBattle() draws the win
   if (pickOpen) return SCR_PICK;
   if (lanOpen) return SCR_LAN;
   if (exploreOpen) return SCR_EXPLORE;
   if (gymOpen) return gymPick ? SCR_GYMPICK : SCR_GYM;
+  if (playerOpen) return SCR_PLAYER;
   if (pet.hasLearnOffer()) return SCR_LEARN;
-  if (gameOpen || sackOpen || spdOpen || memoOpen) return SCR_GAME;
-  if (trainOpen) return SCR_TRAIN;
+  if (cardOpen) return SCR_CARD;
   if (menuOpen) return SCR_MENU;
   return SCR_MAIN;
 }
@@ -4803,6 +4830,25 @@ static void btlUseItem(ItemKey k) {
   btlResolve(0);   // using an item costs the turn, as it does in the real games
 }
 
+// The member to bring on after `at` went down: the next one STILL STANDING,
+// wrapping round, never `at` itself -- or -1 when nobody is left. `squad[at]` is
+// the stale copy of whoever is out (the live one is btlYou / btlFoe), which is
+// why it is skipped rather than read.
+//
+// THE single answer for both squads that can switch. Both used to assume the
+// next index was next in line, which a manual switch breaks: send your LAST
+// creature in early and its faint ended a fight you still had fighters for, and
+// a linked rival in the same spot left the host facing a fainted creature with
+// no swap and no ending -- a fight that could never take another turn.
+// A tamer never switches, so its sequential team keeps btlFoeAt + 1.
+static int8_t btlNextAlive(const Combatant *squad, uint8_t n, uint8_t at) {
+  for (uint8_t k = 1; k < n; k++) {
+    uint8_t i = (uint8_t)((at + k) % n);
+    if (!squad[i].fainted()) return (int8_t)i;
+  }
+  return -1;
+}
+
 // One exchange: both sides act in speed order, then burn/poison chip.
 static void btlResolve(uint8_t yourMove) {
   TurnLog lg;
@@ -4867,17 +4913,22 @@ static void btlResolve(uint8_t yourMove) {
   // whoever actually lost health flinches, whichever side dealt it
   if (btlYou.hp < hp0You) btlHitUntil[0] = now + BTL_HIT_MS;
   if (btlFoe.hp < hp0Foe) btlHitUntil[1] = now + BTL_HIT_MS;
-  if (btlLink && btlLinkHost) btlShipResult(yourMove, foeMove, hp0You, hp0Foe);
   if (!btlYou.fainted() && !btlFoe.fainted()) {
     battleEndTurn(btlYou, lg);
     if (lg.damage) btlNarrate(btlYou, btlYou, lg);
     battleEndTurn(btlFoe, lg);
     if (lg.damage) btlNarrate(btlFoe, btlFoe, lg);
   }
+  // AFTER the burn/poison chip, not before it. The result is the guest's whole
+  // picture of the turn and it is absolute state, so it has to be the state the
+  // turn ended in: shipped before the chip, the guest's numbers lagged a step
+  // behind every turn, and a creature the chip finished stayed standing on the
+  // guest's screen -- through to the fight ending under it.
+  if (btlLink && btlLinkHost) btlShipResult(yourMove, foeMove, hp0You, hp0Foe);
   // Someone went down. The replacement is NOT swapped in here -- that made the
   // change instant and read as a jump cut. Flag it, let the sprite drop out of
   // frame, and swap when the player dismisses the message.
-  if (btlFoe.fainted() && btlLink && btlFoeAt + 1 < btlFoeSquadN) {
+  if (btlFoe.fainted() && btlLink && btlNextAlive(btlFoeSquad, btlFoeSquadN, btlFoeAt) >= 0) {
     btlFaintUntil[1] = millis() + BTL_FAINT_MS;
     btlSwapWho = 1;
     return;
@@ -4887,7 +4938,7 @@ static void btlResolve(uint8_t yourMove) {
     btlSwapWho = 1;
     return;
   }
-  if (btlYou.fainted() && btlSquadAt + 1 < btlSquadN) {
+  if (btlYou.fainted() && btlNextAlive(btlSquad, btlSquadN, btlSquadAt) >= 0) {
     btlFaintUntil[0] = millis() + BTL_FAINT_MS;
     btlSwapWho = 0;
     return;
@@ -5278,11 +5329,10 @@ static void btlDoSwap() {
   uint32_t now = millis();
   if (btlSwapWho == 1 && btlLink) {
     btlFoeSquad[btlFoeAt] = btlFoe;
-    // the next one still standing, not simply the next index
-    uint8_t nxt = btlFoeAt;
-    while (++nxt < btlFoeSquadN && btlFoeSquad[nxt].fainted()) {}
-    if (nxt >= btlFoeSquadN) { btlSwapWho = -1; return; }
-    btlFoeAt = nxt;
+    // the next one still standing, wrapping round -- see btlNextAlive()
+    const int8_t nxt = btlNextAlive(btlFoeSquad, btlFoeSquadN, btlFoeAt);
+    if (nxt < 0) { btlSwapWho = -1; return; }
+    btlFoeAt = (uint8_t)nxt;
     btlFoe = btlFoeSquad[btlFoeAt];
     btlHpShown[1] = btlFoe.hp;
     btlSyncSprite(1, btlFoe);
@@ -5301,7 +5351,9 @@ static void btlDoSwap() {
     btlSay(T(S_BTL_SENDS), t.name, btlFoe.name);
   } else if (btlSwapWho == 0) {
     btlSquad[btlSquadAt] = btlYou;     // remember how battered it was
-    btlSquadAt++;
+    const int8_t nxt = btlNextAlive(btlSquad, btlSquadN, btlSquadAt);
+    if (nxt < 0) { btlSwapWho = -1; return; }
+    btlSquadAt = (uint8_t)nxt;
     btlYou = btlSquad[btlSquadAt];
     btlHpShown[0] = btlYou.hp;
     btlSyncSprite(0, btlYou);
@@ -6363,8 +6415,11 @@ static void lanOffer(bool host) {
   // exactly what the player just chose in the picker, and that does not depend
   // on whether the radio comes up -- doing it the other way round meant a
   // failed radio skipped the squad entirely and left nothing to inspect.
+  // Our name goes to begin(), which is what the hello announces. It used to be
+  // written into peerName here instead -- the slot the peer's name lands in --
+  // so the first hello that arrived overwrote it and every resend after that
+  // echoed the rival's own name back to them.
   lan.begin(host, pet.trainerName);
-  snprintf(lan.peerName, sizeof(lan.peerName), "%s", pet.trainerName);
   buildSquad(0, TRAINER_TEAM_MAX, squadMask);
   for (uint8_t i = 0; i < btlSquadN; i++) {
     LinkMon m;
@@ -6815,17 +6870,22 @@ void renderCardProgress() {
   gfx->print(lv);
 
   // barra de progreso al siguiente nivel (1 nivel = 60 min de juego)
-  uint8_t into = pet.ageMinutes % MINUTES_PER_LEVEL;
+  // At the cap the age keeps running but the level does not, so "N min to Lv.101"
+  // promised a level that cannot exist. A full bar and no countdown instead.
+  const bool capped = pet.level() >= MAX_LEVEL;
+  uint8_t into = capped ? MINUTES_PER_LEVEL : pet.ageMinutes % MINUTES_PER_LEVEL;
   int bx = 93, bw = 280, by = 158, bh = 22;
   gfx->fillRoundRect(bx, by, bw, bh, 6, UI_TRACK);
   int fw = (bw - 4) * into / MINUTES_PER_LEVEL;
   if (fw > 0) gfx->fillRoundRect(bx + 2, by + 2, fw, bh - 4, 5, UI_BAR_OK);
-  char nx[26];
-  snprintf(nx, sizeof(nx), T(S_NEXT_LVL_FMT), MINUTES_PER_LEVEL - into, pet.level() + 1);
   gfx->setTextColor(UI_INK);
   gfx->setTextSize(2);
-  gfx->setCursor(CX - strlen(nx) * 6, by + 32);
-  gfx->print(nx);
+  if (!capped) {
+    char nx[26];
+    snprintf(nx, sizeof(nx), T(S_NEXT_LVL_FMT), MINUTES_PER_LEVEL - into, pet.level() + 1);
+    gfx->setCursor(CX - strlen(nx) * 6, by + 32);
+    gfx->print(nx);
+  }
 
   // estado de evolucion
   gfx->setTextColor(UI_INK_SOFT);
@@ -7638,6 +7698,10 @@ void renderKeyboard() {
 }
 
 void keyboardTap(int16_t x, int16_t y) {
+  // Outside the grid first: integer division truncates TOWARDS ZERO, so up to a
+  // key's width left of it, or a key's height above it -- the name box -- used to
+  // land on column 0 / row 0 and type a letter.
+  if (x < KB_X || y < KB_Y) return;
   int col = (x - KB_X) / KB_W, row = (y - KB_Y) / KB_H;
   if (col < 0 || col >= KB_COLS || row < 0 || row >= 5) return;
   int i = row * KB_COLS + col;
@@ -7670,7 +7734,9 @@ void drawThumb(const uint8_t *b, int x, int y, int s, bool sil) {
   for (int r = 0; r < h; r++) {
     for (int c = 0; c < w; c++) {
       uint8_t idx = d[r * w + c];
-      if (idx == 0xFF) continue;
+      // 0xFF is transparent, and an index past the palette has no colour: it
+      // would read pixel data as one, or past the entry thumbBlobAt() bounded.
+      if (idx == 0xFF || idx >= n) continue;
       uint16_t col = sil ? INK_K : (uint16_t)(pal[idx * 2] | (pal[idx * 2 + 1] << 8));
       gfx->fillRect(ox + c * s, oy + r * s, s, s, col);
     }
@@ -7873,6 +7939,9 @@ void galleryTap(int16_t x, int16_t y) {
     galleryPmd.unload();
     return;
   }
+  // Outside the grid first, as in keyboardTap(): truncation towards zero made a tap
+  // up to a cell's width LEFT of the grid open the first column's entry.
+  if (x < GAL_X || y < GAL_Y) return;
   int c = (x - GAL_X) / GAL_CELL, r = (y - GAL_Y) / GAL_CELL;
   if (c < 0 || c > 3 || r < 0 || r > 3) return;
   // The SAME function the grid was drawn from, so a tap cannot land on a
@@ -8247,7 +8316,17 @@ uint32_t pmdActTotalMs(const PmdAct &a) {
 }
 
 uint8_t pmdFrameAt(const PmdAct &a, uint32_t t, bool loop) {
+  if (!a.frames) return 0;
   uint32_t total = pmdActTotalMs(a);
+  // Every duration zero: pmdActTotalMs() reports 100 so nothing divides by zero,
+  // but the walk below could then never subtract its way out -- t >= 0 forever,
+  // a watchdog reset, and a boot loop if it is the creature on the main screen.
+  // No sprite we ship does this; a damaged file on the card can.
+  if (total == 100) {
+    uint32_t raw = 0;
+    for (uint8_t i = 0; i < a.frames; i++) raw += a.ms[i];
+    if (!raw) return 0;
+  }
   if (!loop && t >= total) return a.frames - 1;
   t %= total;
   uint8_t i = 0;

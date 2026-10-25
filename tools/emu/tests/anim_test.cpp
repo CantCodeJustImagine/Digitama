@@ -6,6 +6,7 @@
 #include "pet.h"
 #include "party.h"
 #include "battle.h"
+#include "sdmon.h"
 #include <cstdio>
 uint32_t g_seed=31; FakeSerial Serial; FakeESP ESP; FakeWire Wire;
 volatile int g_touchX=0,g_touchY=0; volatile bool g_touchDown=false;
@@ -20,6 +21,7 @@ extern uint8_t btlMsgCount;
 extern uint32_t btlHitUntil[2], btlLungeUntil[2];
 extern uint16_t btlHpShown[2];
 void startBattle(int16_t dex, uint8_t lvl);
+uint8_t pmdFrameAt(const PmdAct &a, uint32_t t, bool loop);
 
 static int bad=0;
 static void ck(bool ok,const char*w){printf("%s  %s\n",ok?"PASS":"FAIL",w); if(!ok)bad++;}
@@ -59,6 +61,18 @@ int main(){
   uint16_t hp = btlYou.hp;
   for (int i=0;i<20;i++) render();
   ck(btlYou.hp==hp, "rendering alone never changes anyone's health");
+
+  // A damaged sprite whose every frame lasts 0 ms must not hang the frame picker.
+  // Its total reads as 100 so nothing divides by zero, and the walk that follows
+  // then never got out -- a watchdog reset, and a boot loop on the main screen.
+  {
+    PmdAct z; z.frames = 3; z.ms[0] = z.ms[1] = z.ms[2] = 0;
+    ck(pmdFrameAt(z, 12345, true) < 3 && pmdFrameAt(z, 0, false) < 3,
+       "an action whose frames all last 0 ms still picks a frame, rather than spinning");
+    PmdAct ok; ok.frames = 2; ok.ms[0] = 100; ok.ms[1] = 100;
+    ck(pmdFrameAt(ok, 150, true) == 1 && pmdFrameAt(ok, 50, true) == 0,
+       "and a normal action still advances frame by frame");
+  }
   printf("%s\n", bad?"FAILURES":"all good");
   return bad?1:0;
 }

@@ -79,6 +79,25 @@ int main(){
     ck(!m.load(9999, false), "nor one past the table");
   }
 
+  // --- thumbs.bin is bounded by its own size, not by what it claims
+  {
+    ck(thumbs.load(), "the real thumbs.bin loads");
+    int whole = 0;
+    for (int16_t d = 1; d <= DEX_COUNT; d++) if (thumbs.get(d)) whole++;
+    ck(whole == DEX_COUNT, "and every Digimon's entry in it is whole");
+
+    // count 2 -- but the offset table only has room for one entry, and that
+    // entry's offset points far past the end of the file
+    uint8_t lie[14] = { 'T','P','T','H', 2, 0, 0xF0, 0xFF, 0x00, 0x00, 1, 1, 1, 0 };
+    ck(!thumbBlobAt(lie, sizeof(lie), 2, 1), "an offset past the end of the file is refused");
+    ck(!thumbBlobAt(lie, 12, 2, 2), "and so is an entry the offset table has no room for");
+    // offset 10: a 1x1 image with one colour needs 3 + 2 + 1 = 6 bytes, and has 4
+    lie[6] = 10; lie[7] = lie[8] = lie[9] = 0;
+    ck(!thumbBlobAt(lie, sizeof(lie), 1, 1), "an entry that runs off the end is refused");
+    uint8_t ok[16] = { 'T','P','T','H', 1, 0, 10, 0, 0, 0, 1, 1, 1, 0x1F, 0x00, 0 };
+    ck(thumbBlobAt(ok, sizeof(ok), 1, 1) == ok + 10, "while a whole one is returned");
+  }
+
   printf("%s\n", bad?"FAILURES":"all good");
   return bad?1:0;
 }

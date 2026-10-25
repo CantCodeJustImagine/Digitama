@@ -301,6 +301,12 @@ int main(int argc, char **argv) {
   // ---- level-up learn prompt: accept into a slot, and decline.
   // Past level 36, so LEER@15 / FLAMETHROWER@34 / WING ATTACK@36 are all in
   // range and more of them exist than there are slots.
+  //
+  // The picker opened above is still up when the known move was not on its list,
+  // and render() draws the picker OVER a learn prompt. This section used to tap
+  // the prompt straight through it -- which only worked because onTap() answered
+  // an offer nobody could see. Back out of the picker first, as a player would.
+  movePickOpen = false;
   pet.ageMinutes = 40 * MINUTES_PER_LEVEL;
   pet.relearnFromLevel();
   pet.lastLearnLevel = 0;

@@ -557,6 +557,36 @@ int main(){
   }
 done:
 
+  // ---- the keyboard and the Digidex answer only INSIDE their grids
+  //
+  // Both turned a tap into a cell with (x - X0) / W, and C++ division truncates
+  // TOWARDS ZERO -- so anything up to a whole cell left of or above the grid came
+  // out as column or row 0. On the keyboard that put the name box on the A-F row:
+  // tapping the name you were editing typed a letter into it.
+  {
+    extern char nameBuf[12]; extern uint8_t nameLen; extern bool kbOpen;
+    void openKeyboard(); void keyboardTap(int16_t, int16_t);
+    openKeyboard();
+    const uint8_t len0 = nameLen;
+    keyboardTap(233, 104);                    // on the name box itself, above the keys
+    keyboardTap(20, 170);                     // left of the first column
+    ck(nameLen == len0, "a tap on the name box or beside the keys types nothing");
+    keyboardTap(40 + 20, 150 + 20);           // the A key, as a control
+    ck(nameLen == len0 + 1 || len0 == 11, "while the A key still types (the keyboard is live)");
+    kbOpen = false;
+
+    extern bool galleryOpen, galleryPick; extern int16_t galleryDetail;
+    extern uint8_t galleryFilter, galleryPage, galleryRegion;
+    void galleryTap(int16_t, int16_t);
+    galleryOpen = true; galleryPick = false; galleryDetail = 0;
+    galleryFilter = 0; galleryPage = 0; galleryRegion = 0;
+    galleryTap(40, 120);                      // left of the first column
+    ck(galleryDetail == 0, "a tap left of the Digidex grid opens nothing");
+    galleryTap(73 + 40, 84 + 40);             // the first cell, as a control
+    ck(galleryDetail != 0, "while the first cell still opens its entry");
+    galleryDetail = 0; galleryOpen = false;
+  }
+
   printf("%s\n", bad?"FAILURES":"all good");
   return bad?1:0;
 }

@@ -129,15 +129,49 @@ function hex4(v) {
   return `0x${v.toString(16).toUpperCase().padStart(4, '0')}`;
 }
 
+// The firmware's CHECKPOINTED records (ckpt.h): u32 magic, u16 version, u16 size,
+// u32 generation, the body, then a CRC-16/CCITT-FALSE over everything before it --
+// the same crc16() as above. Each lives in two keys written alternately, and the
+// newest COMPLETE one is the truth, exactly as the board picks it on boot.
+const PET_MAGIC = 0x31504b54;       // "TKP1", pet.cpp PET_CORE_MAGIC
+const PLAYER_MAGIC = 0x31594b54;    // "TKY1", pet.cpp PLAYER_MAGIC
+const PLAYER_FIXED_V1 = 42;         // a v1 player record's scalar block
+
+const rd16 = (b, at) => b[at] | (b[at + 1] << 8);
+const rd32 = (b, at) => (b[at] | (b[at + 1] << 8) | (b[at + 2] << 16) | (b[at + 3] << 24)) >>> 0;
+
+function validRecord(rec, magic) {
+  if (!rec || rec.length < 14) return false;
+  if (rd32(rec, 0) !== magic || rd16(rec, 6) !== rec.length) return false;
+  return rd16(rec, rec.length - 2) === crc16(rec.subarray(0, rec.length - 2));
+}
+
+// Whichever of the pair validates and is newer -- wrap-safe, like the firmware's
+// generationAfter() -- or null when neither does.
+function newestRecord(a, b, magic) {
+  const okA = validRecord(a, magic), okB = validRecord(b, magic);
+  if (okA && okB) return ((rd32(a, 8) - rd32(b, 8)) | 0) > 0 ? a : b;
+  return okA ? a : okB ? b : null;
+}
+
 // Reads the few fields worth showing a player, so a stored backup can be
 // labelled with something recognisable instead of only a timestamp. Walks the
 // key-driven format save.cpp writes: klen, key, kind, u16 length, value.
+//
+// From the CHECKPOINTS first. That is all a current board exports -- the ~50
+// legacy keys stopped being written in v4.0 -- and reading only those meant every
+// backup taken from current firmware said "no details": in the history, and on the
+// restore confirmation, which exists so a player can see what they are about to
+// overwrite. The legacy keys still label a backup from a board that predates the
+// checkpoints, which a player may well be holding.
 //
 // Deliberately TOLERANT: it is only used for a label, so anything it cannot make
 // sense of comes back undefined rather than throwing and losing the backup a
 // player is trying to keep.
 export function describeBackup(blob) {
   const out = {};
+  const legacy = {};
+  const rec = {};
   try {
     let at = SAVE_HEADER_BYTES;
     const end = blob.length - SAVE_CRC_BYTES;
@@ -151,15 +185,37 @@ export function describeBackup(blob) {
       if (at + len > end) break;
       const value = blob.subarray(at, at + len);
       at += len;
-      if (key === 'tnam' && len) out.trainer = trimText(value);
-      else if (key === 'dexn' && len >= 2) out.dex = (value[0] | (value[1] << 8)) << 16 >> 16;
-      else if (key === 'age' && len >= 4) {
-        out.ageMinutes = value[0] | (value[1] << 8) | (value[2] << 16) | (value[3] << 24);
+      if (key === 'petA' || key === 'petB' || key === 'plyA' || key === 'plyB') rec[key] = value;
+      else if (key === 'tnam' && len) legacy.trainer = trimText(value);
+      else if (key === 'dexn' && len >= 2) legacy.dex = (value[0] | (value[1] << 8)) << 16 >> 16;
+      else if (key === 'age' && len >= 4) legacy.ageMinutes = rd32(value, 0);
+    }
+
+    const pet = newestRecord(rec.petA, rec.petB, PET_MAGIC);
+    if (pet && pet.length >= 22 + SAVE_CRC_BYTES) {
+      out.ageMinutes = rd32(pet, 12);
+      out.dex = rd16(pet, 20) << 16 >> 16;      // int16: -1 is an egg
+    }
+    // The name sits after the arrays, and the record carries their dimensions --
+    // see Pet::savePlayerSnapshot(). A zero at buf[19] is a v1 record.
+    const ply = newestRecord(rec.plyA, rec.plyB, PLAYER_MAGIC);
+    if (ply && ply.length > 20) {
+      const fixed = ply[19] || PLAYER_FIXED_V1;
+      const nameAt = fixed + 2 * rd16(ply, 12) + 4 * ply[15] + 2 * ply[14];
+      const nameEnd = nameAt + ply[16];
+      if (ply[16] && nameEnd <= ply.length - SAVE_CRC_BYTES) {
+        const name = trimText(ply.subarray(nameAt, nameEnd));
+        if (name) out.trainer = name;
       }
     }
   } catch {
     // a label is never worth failing a backup over
   }
+  if (out.dex === undefined && legacy.dex !== undefined) {
+    out.dex = legacy.dex;
+    if (legacy.ageMinutes !== undefined) out.ageMinutes = legacy.ageMinutes;
+  }
+  if (out.trainer === undefined && legacy.trainer) out.trainer = legacy.trainer;
   return out;
 }
 

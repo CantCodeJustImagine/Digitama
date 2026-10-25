@@ -59,6 +59,14 @@ int main(){
   ck(B.theirs[0].dex==6 && A.theirs[0].dex==4, "and the right creatures in it");
   ck(!strcmp(B.theirs[1].name,"SHELL"), "names survive the wire");
   ck(A.isHost && !B.isHost, "the roles stay as they were offered");
+  // Each side announces ITS OWN name. The hello used to be filled from
+  // peerName -- the slot the OTHER side's name lands in -- so the answer to
+  // A's hello carried A's own name straight back to it.
+  ck(!strcmp(A.peerName,"GUEST"), "the host is told the guest's name, not its own");
+  ck(!strcmp(B.peerName,"HOST"), "and the guest the host's");
+  A.tick(0); A.state = LINK_SQUADS; A.tick(LINK_RESEND_MS + LINK_JITTER_MS);   // a resend
+  ck(!strcmp(B.peerName,"HOST"), "a resent hello does not rename the rival");
+  A.state = LINK_READY;
 
   // a creature restored from the wire must fight identically
   Combatant back; linkMonTo(back, B.theirs[0]);

@@ -99,7 +99,7 @@ static void sendHello(Link &l) {
   uint16_t tag = linkBuildTag();
   b[HB_BUILD] = (uint8_t)(tag & 0xFF);
   b[HB_BUILD + 1] = (uint8_t)(tag >> 8);
-  memcpy(b + HB_NAME, l.peerName, LINK_NAME_LEN);
+  memcpy(b + HB_NAME, l.myName, LINK_NAME_LEN);
   put(l, LM_HELLO, b, HB_LEN);
 }
 
@@ -139,11 +139,17 @@ void Link::begin(bool host, const char *myName) {
   txLive = false;
   txAt = 0;
   resendSeq = 0;
+  endResends = 0;
   lastRx = 0;
   sawRx = false;
   armed = false;
   peerName[0] = 0;
-  (void)myName;
+  memset(this->myName, 0, sizeof(this->myName));
+  if (myName) {
+    size_t n = strlen(myName);
+    if (n > LINK_NAME_LEN - 1) n = LINK_NAME_LEN - 1;
+    memcpy(this->myName, myName, n);
+  }
 }
 
 void Link::addMon(const LinkMon &m) {
@@ -183,6 +189,7 @@ void Link::sendEnd(bool hostWon) {
   put(*this, LM_END, &b, 1, true);
   youWon = isHost ? hostWon : !hostWon;
   state = LINK_DONE;
+  endResends = LINK_END_RESENDS;   // tick() repeats it; see the DONE branch there
 }
 
 void Link::sendBye() {
@@ -208,15 +215,32 @@ void Link::rearm() {
   resultNew = false;
   youWon = false;
   txLive = false;
+  endResends = 0;
   state = LINK_READY;
 }
 
 // Resend what we last said, and give up on a peer that has gone quiet. Called
 // once a frame; `now` is passed in so a test can drive time directly.
 void Link::tick(uint32_t now) {
-  if (!live() || state == LINK_DONE) return;
+  if (!live()) return;
   if (!armed) { armed = true; lastRx = now; txAt = now; }
   if (sawRx) { sawRx = false; lastRx = now; }
+
+  // A finished fight never times out -- the result screen is not a connection
+  // that went quiet -- but the host still owes the guest its END. This used to
+  // return before any resend at all, so END went out exactly once and a single
+  // lost frame left the guest on a fight that was over, until its own timeout
+  // reported the peer as gone instead of who won.
+  if (state == LINK_DONE) {
+    if (!txLive || !endResends) return;
+    uint32_t wait = LINK_RESEND_MS + ((uint32_t)(id + resendSeq * 37u) % LINK_JITTER_MS);
+    if (now - txAt < wait) return;
+    txAt = now;
+    resendSeq++;
+    endResends--;
+    rawSend(*this, tx, txN);
+    return;
+  }
 
   uint32_t limit = (state == LINK_READY || state == LINK_WAITING)
                      ? LINK_BATTLE_TIMEOUT_MS : LINK_PAIR_TIMEOUT_MS;
@@ -304,7 +328,12 @@ void Link::onPacket(const uint8_t *buf, uint8_t len) {
       if (idx + 1 > theirsN) theirsN = idx + 1;
       // Only ready once the WHOLE squad is here. A lost SQUAD packet used to
       // leave a gap that read back as a real creature with dex 0.
-      if (mineN && theirsExpected) {
+      //
+      // And only FROM LINK_SQUADS. A peer that is still missing part of OUR
+      // squad keeps resending its own, so a complete set can land long after we
+      // moved on -- and promoting from WAITING put a guest that had already
+      // chosen back on the menu and cancelled the resend of its action.
+      if (state == LINK_SQUADS && mineN && theirsExpected) {
         uint16_t want = (uint16_t)((1u << theirsExpected) - 1);
         if ((theirsGot & want) == want) {
           theirsN = theirsExpected;

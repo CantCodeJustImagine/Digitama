@@ -159,6 +159,35 @@ int main() {
     ck(flame30, "GREYMON learns MEGA FLAME at level 30");
   }
 
+  // --- junk in a stored record is dropped before anything indexes a table with it
+  //
+  // The party checked a slot's dex but not its moves; Pet::load() checked the
+  // moves but not the dex. Each guard was in one path and missing from its twin.
+  {
+    Preferences w;
+    w.begin("tamadigi", false);
+    w.clear();
+    PartyMon slots[PARTY_SLOTS];
+    slots[0].dex = 3; slots[0].level = 30;
+    slots[0].moves[0] = 250; slots[0].moves[1] = 2;     // 250 is not a move
+    slots[1].dex = 999; slots[1].level = 30;            // and 999 is not a Digimon
+    w.putBytes("party", slots, sizeof(slots));
+    w.putBool("init", true);
+    w.putShort("dexn", 999);
+    w.putShort("eggT2", 999);
+    w.end();
+
+    Party q;
+    q.begin();
+    ck(q.slots[0].dex == 3 && q.slots[0].moves[0] == 0 && q.slots[0].moves[1] == 2,
+       "a party record's junk move is dropped, and its real one kept");
+    ck(q.slots[1].empty(), "a party record with a junk dex is an empty slot");
+    Pet r;
+    r.begin();
+    ck(r.speciesId == -1, "a pet saved with a junk dex comes back as an egg, not as an index");
+    ck(r.eggPeek() >= 1 && r.eggPeek() <= DEX_COUNT, "and its egg holds a real Digimon");
+  }
+
   printf("%s\n", bad ? "FAILURES" : "all good");
   return bad ? 1 : 0;
 }

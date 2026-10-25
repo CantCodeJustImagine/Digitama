@@ -2,9 +2,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include "dex.h"
+#include "moves.h"  // MOVE_COUNT, for partyMonSanitize()
 #include "ckpt.h"   // the alternating CRC-checked record format, shared with pet.cpp
 
 Party party;
+
+void partyMonSanitize(PartyMon &m) {
+  if (m.dex < 1 || m.dex > DEX_COUNT) { m = PartyMon(); return; }
+  m.nick[sizeof(m.nick) - 1] = 0;
+  for (uint8_t &mv : m.moves)
+    if (mv >= MOVE_COUNT) mv = 0;   // never index MOVE_TBL with junk, as Pet::load() says
+}
 
 // Same NVS namespace as the pet on purpose: WIPE (Pet::factoryReset) calls
 // clear() on it, and a factory reset that left the party behind would be a lie.
@@ -53,10 +61,7 @@ void Party::begin() {
   }
   // a blob written by an older/newer build could hold nonsense; drop anything
   // that is not a real Digidex number rather than indexing DEX_TBL with it
-  for (auto &s : slots) {
-    if (s.dex < 1 || s.dex > DEX_COUNT) s.dex = 0;
-    s.nick[sizeof(s.nick) - 1] = 0;
-  }
+  for (auto &s : slots) partyMonSanitize(s);
   // The box is a separate key and simply absent on an older save, which leaves
   // it zeroed -- exactly what an empty box is.
   for (auto &s : box) s = PartyMon();
@@ -100,14 +105,8 @@ void Party::begin() {
   if (!pairLoaded && (prefs.isKey("pbA") || prefs.isKey("pbB")))
     Serial.println("save: BOTH party checkpoints failed; using legacy keys");
 
-  for (auto &s : slots) {
-    if (s.dex < 1 || s.dex > DEX_COUNT) s.dex = 0;
-    s.nick[sizeof(s.nick) - 1] = 0;
-  }
-  for (auto &s : box) {
-    if (s.dex < 1 || s.dex > DEX_COUNT) s.dex = 0;
-    s.nick[sizeof(s.nick) - 1] = 0;
-  }
+  for (auto &s : slots) partyMonSanitize(s);
+  for (auto &s : box) partyMonSanitize(s);
   // Rewrite only after the checkpoint has had the last word. Doing this in the
   // legacy branch above could overwrite one half of a newer checkpoint before
   // it was read. A future larger checkpoint is deliberately left untouched.
@@ -365,6 +364,10 @@ bool Party::focusPending(uint8_t *slot, PartyMon *outgoing, bool *outgoingWasEgg
   cur.take(&out, sizeof(out), monBytes);   // prefix rule, as everywhere else
   cur.take(&in, sizeof(in), monBytes);
   if (cur.bad) return false;
+  // focusRecover() hands `in` straight to Pet::switchTo(), which indexes DEX_TBL
+  // and MOVE_TBL with it.
+  partyMonSanitize(out);
+  partyMonSanitize(in);
   if (outgoing) *outgoing = out;
   if (incoming) *incoming = in;
   return true;

@@ -5,10 +5,14 @@ set -e
 cd "$(dirname "$0")/.."
 FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
 
+# The folder has to be named after TamaDigi.ino, and this fork's is not -- see
+# tools/sketch_dir.sh. Binaries are exported beside whichever copy was compiled.
+. tools/sketch_dir.sh
+SKETCH="$(tama_sketch_dir "$PWD")"
 echo "Compilando..."
-arduino-cli compile --fqbn "$FQBN" --export-binaries .
+arduino-cli compile --fqbn "$FQBN" --export-binaries "$SKETCH"
 
-B=build/esp32.esp32.esp32s3
+B="$SKETCH/build/esp32.esp32.esp32s3"
 mkdir -p web/firmware   # not tracked: CI and start.bat fill it
 echo "Fusionando binarios..."
 # esptool is not on PATH; the Arduino core ships one and that is the version

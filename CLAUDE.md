@@ -43,8 +43,10 @@ wins reset at every digivolution. `wins` lives in the pet checkpoint's former
 padding byte, so the record layout did not change.
 
 A Digimon with no sprite (`noart.h`) never hatches, is never a branch target and
-never appears in the wild. Ver.3 has no Baby I art, so `regionHatchable()` keeps
-its egg locked while its other Digimon still appear in the wild and the ladders.
+never appears in the wild. A version whose Baby I has no art keeps its egg locked
+(`regionHatchable()`) while its other Digimon still appear in the wild and the
+ladders. Today `NO_ART_COUNT` is 0 -- every Digimon, Ver.3's Poyomon included, has
+a sprite -- so that path only engages again if a pack ships with a hole in it.
 
 ## Screenshots — and why they went a dozen releases stale
 
@@ -98,8 +100,9 @@ EOF
 ```
 
 **Check the prose against the code, not against memory.** Derive counts
-(`DEX_COUNT` 61, `REGION_COUNT` 5 including `REGION_ALL`, `GYM_REGIONS` 4) from
-the generated headers rather than trusting an old sentence.
+(`DEX_COUNT` 87, `REGION_COUNT` 6 including `REGION_ALL`, `GYM_REGIONS` 5) from
+the generated headers rather than trusting an old sentence -- this one said 61, 5
+and 4 for longer than any of them were true.
 
 ## The web installer's save vault
 
@@ -132,10 +135,20 @@ Two rules that test earns its keep by:
   emulator, which reads stdin as its serial console:
 
   ```bash
-  printf 'EGG 6\nLVL 30\nIV 31 20 25 28\nTR 40 30 20\nPARTY 25\nEXPORT\nWIPE\n' \
-    | SDL_VIDEODRIVER=dummy tools/emu/tamadigi-emu --save /tmp/f.nvs --wipe
+  printf 'EGG 6\nIV 31 20 25 28\nTR 40 30 20\nTRAINER ASH\nLVL 29\nLVL 30\nPARTY 25\nEXPORT\nWIPE\n' \
+    | SDL_VIDEODRIVER=dummy tools/emu/tamadigi-emu --save /tmp/f.nvs --wipe \
+    | grep -E '^# TamaDigi|^IMPORT' > tools/fixtures/golden.tpsave
   ```
-  (`WIPE` is how it exits — `ESP.restart()` is `exit(0)` there.)
+  (`WIPE` is how it exits — `ESP.restart()` is `exit(0)` there.) `LVL 29` then
+  `LVL 30` is deliberate: the two pet checkpoint slots then hold different ages,
+  so the label test also proves the NEWEST complete slot is the one read.
+
+  **Regenerate it whenever the export's KEYS change**, not only its format. It
+  was once a capture from a build that still wrote the ~50 legacy keys, and
+  `describeBackup()` read only those -- so every label test passed while every
+  backup from current firmware was labelled "no details", on the restore
+  confirmation too. `tools/fixtures/legacy.tpsave` is that old capture, kept
+  because a player may still hold one.
 
 Things that have already bitten, or nearly:
 
@@ -177,7 +190,9 @@ Things that have already bitten, or nearly:
 ## Releasing
 
 `git push origin vX.Y` is the whole release: `.github/workflows/publish-release.yml`
-runs `tools/check_release.py` and then publishes. Before tagging:
+builds the firmware, runs `tools/check_release.py` and then publishes. The build
+step is not optional: `web/firmware/` is gitignored, so without it the check found
+no binaries and refused every tag. Before tagging:
 
 1. `bash tools/build_web.sh` -- **after the last source edit.** `check_release.py`
    verifies each binary's `?v=` hash against its own bytes, not against the
@@ -221,6 +236,15 @@ arduino-cli upload -p /dev/cu.usbmodemXXXX --fqbn "$FQBN" .
 
 bash tools/build_web.sh   # recompiles, writes the 4 parts, bumps the manifest, repacks every region
 ```
+
+**The folder must be named `TamaDigi`.** arduino-cli refuses a sketch whose folder
+is not named after its main file, and this fork's repository is `Digitama` -- so
+`git clone` and GitHub Actions both produce a folder that does not compile, and a
+symlink does not help because arduino-cli resolves it. The bare `compile .` above
+only works from a `TamaDigi` folder. `build_web.sh`, `flash.sh` and `tests/run.sh`
+ask `tools/sketch_dir.sh` instead, which stages a fresh copy under `build/sketch/`
+when the name is wrong. Any new script that compiles must ask it too, rather
+than pass `.` -- that is § "Traps" case 1 waiting to happen.
 
 **PSRAM (OPI) is mandatory** — the 466×466×16-bit framebuffer is ~434 KB and lives there.
 Wrong partition scheme (no FAT) or PSRAM off = it builds and then fails on hardware.
@@ -275,6 +299,10 @@ second caller has its own copy of it, and nobody notices until a player does.
 | the 3 s hold is for the pet | a list of screens to EXCLUDE | every screen not on that list | holding a PARTY SLOT offered to release the LIVE pet |
 | sprites load up to `DEX_COUNT` | the emulator's `PmdMon::load()` | the firmware's, in `sdmon.cpp` (`> 999`) | dex 1000-61 never drew on a board while `sprite_test` passed |
 | thumbnails follow a new pack | `thumbs.load()` in `setup()` | a `thumbs.bin` arriving later over `PUT` | the region unlocked, and its Digidex thumbnails stayed old until a restart |
+| a modal answers only while drawn | `render()` draws the party, Digidex, keyboard, minigames OVER a learn offer | `onTap()` checked the offer first | a tap on party slot 0 silently replaced the live creature's first move; `uiCurrentScreen()` must mirror `render()`'s order exactly |
+| the next fighter is the next one STANDING | `btlDoSwap()`, the linked rival only, and only searching forward | your own side and the end-of-fight check (`index + 1`) | send your last member in early and its faint lost a fight you still had fighters for; a rival in that spot hung the fight -- `btlNextAlive()` |
+| a waiting creature is let go by LET GO | the red button | every swipe and the top band | the creature that just finished its life was released by the gesture used to change screens |
+| a stored record is checked before use | the party's dex, `Pet::load()`'s moves | the party's moves, the pet's dex, the handover and the focus journal | out-of-bounds reads off junk -- `partyMonSanitize()` |
 | a control waits while the page is busy | `syncControls()` | Back up save, added after the list was written | `EXPORT` written into a pack transfer, then the port closed under it |
 
 **A guard written as a list of EXCLUSIONS is this trap pre-loaded.** The hold
@@ -507,6 +535,8 @@ On hardware, verify over the serial console (115200):
   variant (IV floor 20) guarantees fire only inside `hatch()`, so this is the only
   way to reach them — `VARIANT` just flips the flag on an already-hatched pet
 - `BYE` / `RUN` / `ABANDON` — the three endings · `BEEP` audio · `LS` / `PUT` SD files
+- `NICK <name>` the creature's nickname · `TRAINER <name>` the player's, which is
+  what the installer labels a backup with (the golden fixture uses it)
 - `TIME <epoch>` / `RTCSET <epoch>` — offline-progression and clock paths
 
 To exercise long-horizon logic in minutes, temporarily lower `PET_TICK_MS`,

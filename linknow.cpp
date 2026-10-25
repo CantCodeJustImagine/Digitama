@@ -100,7 +100,13 @@ void linkNowPoll() {
 }
 
 bool linkNowBegin(Link *l) {
-  if (gUp) return true;
+  // A radio that is still up belongs to the LAST attempt. The LAN screen offers
+  // HOST/JOIN again straight from LOST and REFUSED without leaving it, and this
+  // used to return early here -- so the MAC lock on the previous peer survived,
+  // and every packet from any OTHER board was dropped as foreign. Retrying with
+  // a different device, or after a build mismatch with the wrong one, could
+  // never pair until the player backed out of the screen. Start clean instead.
+  if (gUp) linkNowEnd();
   gLink = l;
   gLocked = false;
   gPeerAdded = false;

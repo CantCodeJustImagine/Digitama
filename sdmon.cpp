@@ -117,6 +117,7 @@ bool SdThumbs::load() {
   f.close();
   free(data);
   data = next;
+  this->size = size;
   memcpy(&count, data + 4, 2);
   loaded = true;
   Serial.printf("miniaturas cargadas: %u (%u KB)\n", count, size / 1024);
@@ -124,10 +125,7 @@ bool SdThumbs::load() {
 }
 
 const uint8_t *SdThumbs::get(int16_t dex) const {
-  if (!loaded || dex < 1 || dex > count) return nullptr;
-  uint32_t off;
-  memcpy(&off, data + 6 + 4 * (dex - 1), 4);
-  return data + off;
+  return loaded ? thumbBlobAt(data, size, count, dex) : nullptr;
 }
 
 // Which versions actually have their sprite pack on the card.

@@ -83,7 +83,11 @@ bounded 30 --require 'PASS bounded gates:' -- node "$HERE/bounded.mjs" --self-te
 # it is declared. That shipped once. The mandatory firmware build decides.
 fw_pid=""
 FQBN="esp32:esp32:esp32s3:CDCOnBoot=cdc,FlashSize=16M,PSRAM=opi,PartitionScheme=app3M_fat9M_16MB"
-bounded 600 -- arduino-cli compile --fqbn "$FQBN" "$ROOT" >"$OUT_FW" 2>&1 &
+# The folder has to be named after TamaDigi.ino, and this fork's is not -- so
+# this compiles whatever tools/sketch_dir.sh says the board would be built from.
+. "$ROOT/tools/sketch_dir.sh"
+SKETCH="$(tama_sketch_dir "$ROOT")" || { echo "cannot stage the sketch for arduino-cli" >&2; exit 1; }
+bounded 600 -- arduino-cli compile --fqbn "$FQBN" "$SKETCH" >"$OUT_FW" 2>&1 &
 fw_pid=$!
 
 # The browser halves of the save backup and the pack upload. They are JavaScript,

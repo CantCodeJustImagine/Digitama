@@ -610,6 +610,16 @@ private:
   // Scratch pets used for opponents share the player's NVS namespace. Only a
   // Pet explicitly opened with begin() owns that persistent state.
   bool opened = false;
+  // Set by begin() whether or not NVS opened: this is "the creature on the
+  // panel", not "the save works". Opponents are scratch Pets that are never
+  // begun, and they must not make the live pet's noises -- every boss used to
+  // play the hatch jingle as it stepped in, because building it calls hatch().
+  bool live = false;
+  // The cadence clock of a FROZEN companion. Every periodic effect in tick()
+  // keys off `ageMinutes % n`, and a frozen creature's age never moves -- it sits
+  // on a multiple of MINUTES_PER_LEVEL, so every one of them fired EVERY minute.
+  // RAM only: the phase of a 2- or 3-minute cadence is not worth a save field.
+  uint32_t frozenClock = 0;
   // Consecutive failed checkpoint writes. Reset by the first success, so it
   // measures "is saving broken NOW" rather than counting a lifetime.
   uint8_t saveFailures = 0;
@@ -632,6 +642,9 @@ private:
   uint8_t mistakeCooldown = 0;
   uint8_t ticksSinceSave = 0;
   bool pendingSave = false;     // guardado periodico pendiente de volcar
+  // Both belong to the creature that declined, and newEgg() clears them. They
+  // used to outlive it: "keep form" at level 50 held the NEXT creature's Baby I
+  // back until level 51. See carryover_test.
   uint8_t evoDeclinedLv = 0;    // "mantener forma": no ofrecer evolucion hasta subir de nivel
   uint32_t farDeclinedAge = 0;  // "quedaros juntos": no ofrecer despedida hasta esta edad
   bool starterPick = false;     // primera partida: esperando que el jugador elija inicial

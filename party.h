@@ -58,6 +58,15 @@ struct PartyMon {
   bool hasCareState() const { return stateVersion >= 1; }
 };
 
+// THE one check of a record read back from storage, before anything indexes a
+// table with it: a dex that is not a Digimon empties the slot, a move that is not
+// a move becomes an empty move, and the nickname is terminated. Every path that
+// loads a PartyMon asks this -- the party and box, the pet checkpoint's pending
+// handover and the focus journal -- because they used to keep their own copies of
+// it, and each copy checked something different: the party checked the dex but
+// not the moves, the handover and the journal checked neither.
+void partyMonSanitize(PartyMon &m);
+
 class Party {
 public:
   PartyMon slots[PARTY_SLOTS];

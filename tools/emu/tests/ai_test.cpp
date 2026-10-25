@@ -58,6 +58,39 @@ int main(){
   // it must take a kill when one is available
   Combatant me,foe; mk(me,6,50); mk(foe,3,50);
   foe.hp=6;                         // one hit from fainting
+  // This block used to set the stage and then assert nothing at all.
+  {
+    uint8_t pick=aiChooseMove(me,foe,true);
+    ck(pick && MOVE_TBL[pick].cat!=MC_STATUS &&
+       battleDamage(me,foe,pick,false,217)>=foe.hp,
+       "with the foe one hit from fainting, it attacks for the kill");
+  }
+
+  // A score is an int32 and can be tens of thousands: damage is clamped to
+  // 65535, a kill adds 1000, and a stacked attacker against a stripped defender
+  // is sixteen times the base. The running best was an int16_t, so a score past
+  // 32767 wrapped NEGATIVE and the next, weaker move beat it.
+  {
+    Combatant s,f; mk(s,6,50); mk(f,3,50);
+    f.maxHp=f.hp=65535;             // nothing here is a kill: pure damage scores
+    f.base[SI_DEF]=f.base[SI_SPD]=10;   // a defender whose guard is gone
+    s.moves[0]=MV_HEADBUTT; s.moves[1]=MV_TACKLE; s.moves[2]=s.moves[3]=0;
+    // Find an attack stat that puts the strong move's real damage between
+    // 40000 and 60000 -- through battleDamage() itself, not a copy of it.
+    uint16_t lo=1, hi=65535;
+    while(lo<hi){
+      uint16_t mid=(uint16_t)(lo+(hi-lo)/2);
+      s.base[SI_ATK]=mid;
+      if(battleDamage(s,f,MV_HEADBUTT,false,236)<40000) lo=(uint16_t)(mid+1); else hi=mid;
+    }
+    s.base[SI_ATK]=lo;
+    uint16_t big=battleDamage(s,f,MV_HEADBUTT,false,236);
+    uint16_t small=battleDamage(s,f,MV_TACKLE,false,236);
+    ck(big>32767 && big<60000 && small<32768 && small<big,
+       "the overflow case is set up (a score past int16, a weaker one below it)");
+    ck(aiChooseMove(s,f,true)==MV_HEADBUTT,
+       "a score past 32767 still beats a weaker move instead of wrapping negative");
+  }
   uint8_t pick=aiChooseMove(me,foe,true);
   uint16_t dmg=battleDamage(me,foe,pick,false,236);
   printf("     foe at 6hp: picks %s for ~%u\n",MOVE_TBL[pick].name,dmg);

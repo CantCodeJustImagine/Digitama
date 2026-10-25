@@ -52,11 +52,15 @@ echo "      first over the serial console and keep the block -- it is the only"
 echo "      way back if anything goes wrong."
 echo
 
+# The folder has to be named after TamaDigi.ino -- see tools/sketch_dir.sh.
+# Upload names the SAME directory, so it finds the build that was just made.
+. tools/sketch_dir.sh
+SKETCH="$(tama_sketch_dir "$PWD")"
 echo "Compiling..."
-arduino-cli compile --fqbn "$FQBN" .
+arduino-cli compile --fqbn "$FQBN" "$SKETCH"
 
 echo "Uploading..."
-arduino-cli upload -p "$PORT" --fqbn "$FQBN" .
+arduino-cli upload -p "$PORT" --fqbn "$FQBN" "$SKETCH"
 
 echo
 echo "Done. Firmware v$(grep -o '"[0-9.]*"' TamaDigi.ino | head -1 | tr -d '"') on $PORT"

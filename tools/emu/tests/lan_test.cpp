@@ -27,6 +27,7 @@ extern Combatant btlYou, btlFoe;
 extern Combatant btlSquad[];
 extern uint8_t btlSquadN, btlSquadAt, btlFoeAt, btlMenu, btlMsgCount;
 extern uint8_t btlMyAct, btlFoeSquadN;
+extern int8_t btlSwapWho;
 extern Combatant btlFoeSquad[];
 extern uint16_t squadMask;
 extern bool pickOpen, lanWantHost;
@@ -123,6 +124,89 @@ int main(){
   render();                          // btlLinkPoll spots that both are in
   ck(btlMyAct == 0 && !lan.pendingAct,
      "and the turn goes as soon as the rival's action lands");
+
+  // --- the guest is sent the state at the END of the turn
+  //
+  // Burn and poison chip after both have acted. The host shipped the result
+  // BEFORE applying it, so the guest's numbers were a step behind every turn --
+  // and a creature the chip finished was still standing on the guest's screen,
+  // up to and including the fight ending under it.
+  {
+    const Combatant keepYou = btlYou, keepFoe = btlFoe;
+    btlOver = false; btlMsgCount = 0; btlSwapWho = -1;
+    lan.pendingAct = 0; btlMyAct = 0; lan.state = LINK_READY;
+    for (int i=0;i<MOVE_SLOTS;i++) btlYou.moves[i] = btlFoe.moves[i] = 0;
+    btlYou.moves[0] = btlFoe.moves[0] = MV_GUARD;     // cannot miss, deals nothing
+    btlYou.ailment = AIL_NONE; btlYou.confuseTurns = 0; btlYou.recharge = false; btlYou.charging = 0;
+    btlFoe.confuseTurns = 0; btlFoe.recharge = false; btlFoe.charging = 0;
+    btlFoe.ailment = AIL_POISON; btlFoe.hp = 1;       // the chip is what finishes it
+    btlYou.hp = btlYou.maxHp;                         // whatever the turn above did to it
+    sent = 0;
+    btlMenu = 1;
+    battleTap(69 + 10, 286 + 10);                     // our move slot 0
+    lan.pendingAct = LINK_ACT_MOVE(0);
+    render();
+    ck(btlFoe.fainted(), "the poison chip finishes the rival's creature on the host");
+    LinkResult got{};
+    memcpy(&got, lastPkt + 3, sizeof(got));           // [type][len][turn] then the result
+    ck(sent >= 1 && lastPkt[0] == LM_RESULT && got.guestHp == 0,
+       "and the result the guest is sent already shows it down");
+    btlYou = keepYou; btlFoe = keepFoe; btlSwapWho = -1; btlMsgCount = 0;
+  }
+
+  // --- a faint brings on whoever is STILL STANDING, not merely the next index
+  //
+  // Both squads that can switch assumed the next index was next in line. A
+  // manual switch breaks that: send your last creature in early and its faint
+  // ended a fight you still had a fighter for; a rival in the same position left
+  // the host facing a fainted creature with no swap and no ending at all.
+  {
+    const Combatant keepYou = btlYou, keepFoe = btlFoe;
+    const uint8_t keepAt = btlSquadAt, keepFoeAt = btlFoeAt;
+    auto quiet = [](Combatant &c) {
+      for (int i=0;i<MOVE_SLOTS;i++) c.moves[i] = 0;
+      c.moves[0] = MV_GUARD; c.ailment = AIL_NONE; c.confuseTurns = 0;
+      c.recharge = false; c.charging = 0; c.hp = c.maxHp;
+    };
+    auto turn = []() {
+      btlOver = false; btlMsgCount = 0; btlSwapWho = -1;
+      lan.pendingAct = 0; btlMyAct = 0; lan.state = LINK_READY;
+      btlMenu = 1;
+      battleTap(69 + 10, 286 + 10);
+      lan.pendingAct = LINK_ACT_MOVE(0);
+      render();
+    };
+    auto dismiss = []() { for (int i=0;i<12 && btlMsgCount;i++) battleTap(233, 300); };
+
+    // our side: the LAST member is out, the first is fine, and the chip drops it
+    for (uint8_t i=0;i<btlSquadN;i++) quiet(btlSquad[i]);
+    btlSquadAt = (uint8_t)(btlSquadN - 1);
+    btlYou = btlSquad[btlSquadAt];
+    btlYou.ailment = AIL_POISON; btlYou.hp = 1;
+    btlFoe = btlFoeSquad[btlFoeAt]; quiet(btlFoe);
+    turn();
+    ck(btlYou.fainted(), "our last member goes down to the chip (the set-up holds)");
+    ck(!btlOver && btlSwapWho == 0,
+       "and the fight goes on, because the first member is still standing");
+    dismiss();
+    ck(btlSquadAt == 0 && !btlYou.fainted(), "it is the first member that steps in");
+
+    // the rival's side: their last is out, their first is fine
+    for (uint8_t i=0;i<btlFoeSquadN;i++) quiet(btlFoeSquad[i]);
+    btlYou = btlSquad[btlSquadAt]; quiet(btlYou);
+    btlFoeAt = (uint8_t)(btlFoeSquadN - 1);
+    btlFoe = btlFoeSquad[btlFoeAt];
+    btlFoe.ailment = AIL_POISON; btlFoe.hp = 1;
+    turn();
+    ck(btlFoe.fainted(), "the rival's last member goes down to the chip");
+    ck(!btlOver && btlSwapWho == 1, "and the host does not call the fight won early");
+    dismiss();
+    ck(btlFoeAt == 0 && !btlFoe.fainted() && btlSwapWho < 0,
+       "their first member is brought on, so the fight can take another turn");
+
+    btlYou = keepYou; btlFoe = keepFoe; btlSquadAt = keepAt; btlFoeAt = keepFoeAt;
+    btlSwapWho = -1; btlMsgCount = 0; btlOver = false;
+  }
 
   // --- a peer that goes quiet ends the fight rather than hanging on it
   btlOver = false; btlMsgCount = 0;

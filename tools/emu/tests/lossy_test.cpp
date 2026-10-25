@@ -29,13 +29,23 @@ static int dropEvery = 0;      // drop every Nth frame; 0 = drop nothing
 static int dupEvery = 0;       // deliver every Nth frame twice
 static bool deaf = false;      // nothing gets through at all
 static int seen = 0, dropped = 0;
+// Drop the next `dropTypeLeft` frames of one message type, optionally only those
+// heading to one side -- so a test can lose exactly the packet it is about.
+static uint8_t dropType = 0;
+static int dropTypeLeft = 0;
+static Link *dropTypeTo = nullptr;
+static int sentOfType[16] = { 0 };
 
 static void deliver(Link &to, const uint8_t *b, uint8_t n) {
   to.onPacket(b, n);
 }
 static void wire(Link &to, const uint8_t *b, uint8_t n) {
   seen++;
+  if (n && b[0] < 16) sentOfType[b[0]]++;
   if (deaf) { dropped++; return; }
+  if (dropTypeLeft && n && b[0] == dropType && (!dropTypeTo || dropTypeTo == &to)) {
+    dropTypeLeft--; dropped++; return;
+  }
   if (dropEvery && (seen % dropEvery) == 0) { dropped++; return; }
   // copy first: onPacket may send, which can clobber the caller's buffer
   uint8_t tmp[260]; if (n > sizeof(tmp)) return;
@@ -212,6 +222,60 @@ int main(){
     ck(A.state==LINK_READY && B.state==LINK_READY, "a rematch reopens both sides");
     ck(A.turn==0 && B.turn==0, "from turn zero");
     ck(A.theirsN==hadA && B.theirsN==hadB, "with the squads still in hand");
+  }
+
+  // --- a lost END is said again ---------------------------------------------
+  // END is the one packet the guest cannot do without: it is the only thing that
+  // tells it the fight is over and who won. It was kept for resending like every
+  // other message, but tick() returned early once the host was DONE, so it went
+  // out exactly once. Lose it and the guest sat on a finished fight until its
+  // timeout, then reported the connection as lost instead of a result.
+  {
+    seen=dropped=0; dropEvery=0; dupEvery=0;
+    pair(true,false);
+    run(3000);
+    ck(A.ready() && B.ready(), "paired for the END check");
+    B.sendAct(1); run(600);
+    LinkResult r{}; r.hostHp=40; r.guestHp=0;
+    A.sendResult((const uint8_t*)&r, sizeof(r));
+    run(600);
+    dropType = LM_END; dropTypeLeft = 1; dropTypeTo = &B;
+    const int endsBefore = sentOfType[LM_END];
+    A.sendEnd(true);
+    ck(dropTypeLeft == 0 && B.state != LINK_DONE, "the first END is lost (the drop engaged)");
+    run(3000);
+    ck(B.state == LINK_DONE && !B.youWon, "a resent END still ends the fight on the guest");
+    ck(A.state == LINK_DONE && A.youWon, "and the host is still on its result");
+    // Bounded: the end screen offers a rematch, and an END still arriving after
+    // the guest has started one would knock it back to the result.
+    run(LINK_PAIR_TIMEOUT_MS + 2000, 500);
+    const int ends = sentOfType[LM_END] - endsBefore;
+    ck(ends > 1 && ends <= 1 + LINK_END_RESENDS, "END is repeated a few times, not forever");
+    ck(A.state == LINK_DONE && B.state == LINK_DONE,
+       "and neither end screen times out into 'connection lost'");
+    dropTypeLeft = 0; dropTypeTo = nullptr;
+  }
+
+  // --- a late squad packet does not take back a chosen action ---------------
+  // The guest can reach READY, start the fight and choose while the host is
+  // still missing part of the guest's squad. The host keeps resending its own
+  // squad until it has the rest, and every full set that arrived used to put
+  // the guest back to READY and cancel the resend of the action it was waiting
+  // on -- the move menu came back as though the tap had not registered.
+  {
+    seen=dropped=0; dropEvery=0; dupEvery=0;
+    dropType = LM_SQUAD; dropTypeLeft = 1; dropTypeTo = &A;   // the host misses one
+    pair(true,false);
+    ck(dropTypeLeft == 0, "one of the guest's squad packets is lost (the drop engaged)");
+    ck(B.state == LINK_READY && A.state == LINK_SQUADS,
+       "so the guest is ready while the host is still waiting for its squad");
+    B.sendAct(1);
+    ck(B.state == LINK_WAITING, "the guest chooses and waits");
+    run(1500);
+    ck(A.state == LINK_READY && A.hasPeerAct(), "the host fills the hole and has the action");
+    ck(B.state == LINK_WAITING && B.txLive,
+       "and the guest is still waiting on it, still resending, not back at the menu");
+    dropTypeLeft = 0; dropTypeTo = nullptr;
   }
 
   printf("%s\n", bad?"FAILURES":"all good");
