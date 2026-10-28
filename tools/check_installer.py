@@ -202,6 +202,38 @@ def check_vendored_flasher():
         bad += 1
     return bad
 
+
+def check_no_cdn():
+    """THE PAGE LOADS NOTHING FROM A THIRD-PARTY HOST.
+
+    The flasher was vendored for the save's sake (above); the icons still came
+    from unpkg, so the page drew without them whenever that host was slow or
+    gone, and whatever it served ran on the installer page. Everything the page
+    executes or styles itself with is in web/ now, and each vendored folder
+    carries its licence. Links people click are fine; code that runs is not.
+    """
+    bad = 0
+    with open(os.path.join(WEB, "index.html")) as fh:
+        html = fh.read()
+    for tag in re.findall(r'<script\b[^>]*>|<link\b[^>]*>', html):
+        if tag.startswith("<link") and not re.search(r'rel="(stylesheet|preload|modulepreload)"', tag):
+            continue
+        url = re.search(r'(?:src|href)="([^"]+)"', tag)
+        if url and re.match(r'(https?:)?//', url.group(1)):
+            print("\nFAIL: index.html loads %s from another host; vendor it under web/vendor/"
+                  % url.group(1))
+            bad += 1
+        elif url and url.group(1).startswith("vendor/"):
+            path = os.path.join(WEB, url.group(1).split("?", 1)[0])
+            parts = url.group(1).split("/")
+            if not os.path.exists(path):
+                print("\nFAIL: index.html loads %s, which is not there" % url.group(1))
+                bad += 1
+            elif not os.path.exists(os.path.join(WEB, parts[0], parts[1], "LICENSE")):
+                print("\nFAIL: vendored %s has no LICENSE beside it" % parts[1])
+                bad += 1
+    return bad
+
 def main():
     manifest_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(WEB, "manifest.json")
     manifest_path = os.path.abspath(manifest_path)
@@ -278,6 +310,7 @@ def main():
 
     bad += check_flash_trigger()
     bad += check_vendored_flasher()
+    bad += check_no_cdn()
     print("\n%s" % ("FAILURES" if bad else "the save is out of the blast radius"))
     return 1 if bad else 0
 

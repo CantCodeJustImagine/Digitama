@@ -11,27 +11,19 @@ permissions:
 
 jobs:
   firmware:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest, which GitHub moves to a new release on
+    # its own schedule: the toolchain here is tested against THIS image, and an
+    # upgrade should be a commit that can be reviewed and reverted.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
-      - uses: arduino/setup-arduino-cli@v2
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.arduino15
-            ~/Arduino/libraries
-          key: arduino-${{ runner.os }}-esp32-3.3.11-gfx-1.6.7-sensor-0.4.1-xpowers-0.3.3
       - name: Install host dependencies
         run: sudo -n apt-get update && sudo -n apt-get install -y libsdl2-dev
-      - name: Install pinned firmware dependencies
-        run: |
-          node tools/emu/tests/bounded.mjs 180 -- arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          node tools/emu/tests/bounded.mjs 600 -- arduino-cli core install esp32:esp32@3.3.11 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          node tools/emu/tests/bounded.mjs 300 -- arduino-cli lib install "GFX Library for Arduino@1.6.7" "SensorLib@0.4.1" "XPowersLib@0.3.3"
+      - uses: ./.github/actions/setup-firmware
       - name: Restore committed sprite assets
         run: node tools/emu/tests/bounded.mjs 120 -- python3 tools/unpack_bundle.py
       - name: Install checksum-pinned native ESP32 emulator
@@ -50,7 +42,7 @@ jobs:
         run: node tools/emu/tests/bounded.mjs 2400 --require 'PASS migrated native suites:' --require 'PASS native post-panic fresh-process persistence;' -- bash tools/emu/tests/run.sh
       - name: Retain test evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: firmware-test-evidence
           path: ${{ runner.temp }}/tamadigi-test-logs

@@ -22,22 +22,11 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
-      - uses: arduino/setup-arduino-cli@v2
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.arduino15
-            ~/Arduino/libraries
-          key: arduino-${{ runner.os }}-esp32-3.3.11-gfx-1.6.7-sensor-0.4.1-xpowers-0.3.3
-      - name: Install the pinned ESP32 core and libraries
-        run: |
-          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core install esp32:esp32@3.3.11 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli lib install "GFX Library for Arduino@1.6.7" "SensorLib@0.4.1" "XPowersLib@0.3.3"
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-firmware
       - name: Compile the firmware and stamp the installer
         # Compiler errors are repeated as annotations, so they show on the run's
         # summary page without opening the raw log.
@@ -53,7 +42,7 @@ jobs:
       # start.bat uses it when Pages is not available, e.g. a private repo on a
       # free GitHub plan: put tamadigi-firmware.zip next to start.bat or leave it
       # in Downloads.
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: tamadigi-firmware
           path: |
@@ -62,15 +51,15 @@ jobs:
             web/firmware/boot_app0.bin
             web/firmware/app.bin
             web/manifest.json
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: .
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}web/
     steps:
       - id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5

@@ -15,9 +15,9 @@ jobs:
       contents: read
   release:
     needs: firmware-tests
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history and the main ref: check_release.py refuses a tag that is
           # not reachable from origin/main, and the default shallow checkout of a
@@ -31,18 +31,7 @@ jobs:
       # checkout of the tag has no binaries at all, and check_release.py refuses
       # a manifest whose parts are missing. Without this build every tag failed
       # at "missing web/firmware/bootloader.bin" and nothing could ever publish.
-      - uses: arduino/setup-arduino-cli@v2
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.arduino15
-            ~/Arduino/libraries
-          key: arduino-${{ runner.os }}-esp32-3.3.11-gfx-1.6.7-sensor-0.4.1-xpowers-0.3.3
-      - name: Install the pinned ESP32 core and libraries
-        run: |
-          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core install esp32:esp32@3.3.11 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli lib install "GFX Library for Arduino@1.6.7" "SensorLib@0.4.1" "XPowersLib@0.3.3"
+      - uses: ./.github/actions/setup-firmware
       - name: Build the tagged firmware
         run: bash tools/build_web.sh
 
